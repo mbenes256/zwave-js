@@ -40,7 +40,7 @@ Array.prototype.to_hex_bytes = function() {
     return this.map((e) => (e & 0xff).toString(16).padStart(2, "0")).join(" ");
 }
 
-class timeout {
+export class timeout {
     constructor(func, ms) {
 	this.func = func;
 	this.timeout = setTimeout(this.trigger.bind(this), ms);
@@ -523,7 +523,8 @@ export class zwave {
 	if (cmd.onreq && !cmd.req_id) {
 	    // uses calbacks - append new sessio_id at the end of the frame
 	    ++this.api_cmd_session_id;
-	    if (this.api_cmd_session_id == 0) {
+
+	    if (this.api_cmd_session_id >= 256) {
 		this.api_cmd_session_id = 1;
 	    }
 
