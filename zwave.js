@@ -8,22 +8,22 @@ export async function sleep(ms) {
     });
 }
 
-Object.prototype.get_key = function (val) {
-    for (let e of Object.entries(this)) {
+function obj_val_key(obj, val) {
+    for (let e of Object.entries(obj)) {
 	if (e[1] == val) {
 	    return e[0];
 	}
     }
 
-    return this._default;
+    return obj._default;
 }
 
-Array.prototype.get_bit_list = function(index = 0, val = 1) {
-    const len = this.length;
+function get_bit_list(arr, index = 0, val = 1) {
+    const len = arr.length;
     const ret = [];
 
     for (let i = 0; i < len; ++i) {
-	let b = this[i];
+	let b = arr[i];
 	for (let bit = 0; bit < 8; ++bit) {
 	    if ((b & 1) == 1) {
 		ret.push(index);
@@ -36,8 +36,8 @@ Array.prototype.get_bit_list = function(index = 0, val = 1) {
     return ret;
 }
 
-Array.prototype.to_hex_bytes = function() {
-    return this.map((e) => (e & 0xff).toString(16).padStart(2, "0")).join(" ");
+function hex_bytes(arr) {
+    return arr.map((e) => (e & 0xff).toString(16).padStart(2, "0")).join(" ");
 }
 
 export class timeout {
@@ -56,33 +56,6 @@ export class timeout {
 	    clearTimeout(this.timeout);
 	    delete this.timeout;
 	}
-    }
-}
-
-class async_queue {
-    constructor() {
-	this.queue = [];
-    }
-
-    put(item) {
-	if (this.get_resolve) {
-	    // someone already waiting
-	    this.get_resolve(item);
-	    delete this.get_resolve;
-	} else {
-	    this.queue.push(item);
-	}
-    }
-
-    async get() {
-	return await new Promise((resolve) => {
-	    if (this.queue.length > 0) {
-		// something already in the queue
-		resolve(this.queue.shift());
-	    } else {
-		this.get_resolve = resolve;
-	    }
-	});
     }
 }
 
@@ -113,22 +86,6 @@ class async_mutex {
     }
 }
 
-function date_time_ms() {
-    const d = new Date();
-    let str = d.getMonth().toString().padStart(2, "0");
-    str += "/" + d.getDate().toString().padStart(2, "0");
-    str += "/" + d.getFullYear().toString();
-    str += "  " + d.getHours().toString().padStart(2, "0");
-    str += ":" + d.getMinutes().toString().padStart(2, "0");
-    str += ":" + d.getSeconds().toString().padStart(2, "0");
-    str += "." + d.getMilliseconds().toString().padStart(3, "0");
-    return str;
-}
-
-function log(...msg) {
-    console.log(date_time_ms(), "   ", ...msg);
-}
-
 function rand(bytes) {
     const buf = new Uint8Array(bytes);
     crypto.getRandomValues(buf);
@@ -139,17 +96,15 @@ function rand(bytes) {
  *     AES utils                                                              *
  ******************************************************************************/
 
-const aes_zero = new Uint8Array(16);
-
 async function aes_key_gen(raw) {
     raw = new Uint8Array(raw);
-    return await crypto.subtle.importKey("raw", raw, "AES-CTR", false, ["encrypt"]);
+    return await crypto.subtle.importKey("raw", raw, "AES-CBC", false, ["encrypt"]);
 }
 
 export async function aes_ecb(key, vec) {
     const plaintext = new Uint8Array(vec);
-    // pass the plaintext as counter input to encrypt a single block
-    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({name: "AES-CTR", counter: plaintext, length: 64}, key, aes_zero));
+    const zero_iv = new Uint8Array(16);
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({name: "AES-CBC", iv: zero_iv}, key, plaintext));
 
     for (let i = 0; i < 16; ++i) {
 	vec[i] = ciphertext[i];
@@ -159,25 +114,17 @@ export async function aes_ecb(key, vec) {
 }
 
 function aes_xor(dst, dst_offset, src, src_offset, max_length = 16) {
-    //console.log("aes_xor", dst.to_hex_bytes(), dst_offset, "src", src.to_hex_bytes(), src_offset);
     const length = Math.min(dst.length - dst_offset, src.length - src_offset, max_length);
 
     for (let i = 0; i < length; ++i) {
 	dst[i + dst_offset] ^= src[i + src_offset];
     }
-    //console.log("aes_xor", dst.to_hex_bytes(), "done");
 }
 
 async function s0_key_gen(network_key_raw) {
     const network_key = await aes_key_gen(network_key_raw);
     const auth_key_raw = await aes_ecb(network_key, Array(16).fill(0x55));
     const enc_key_raw = await aes_ecb(network_key, Array(16).fill(0xaa));
-
-    /*
-    console.log("network key:", network_key_raw.to_hex_bytes());
-    console.log("auth_key   :", auth_key_raw.to_hex_bytes());
-    console.log("enc_key    :", enc_key_raw.to_hex_bytes());
-    */
 
     return {auth: await aes_key_gen(auth_key_raw), enc:  await aes_key_gen(enc_key_raw)}
 }
@@ -231,10 +178,17 @@ export class zwave {
      *     initialization                                                         *
      ******************************************************************************/
 
-    constructor(dev_file) {
-	this.dev_file = dev_file;
+    // recv_func      ... async function that returns 1 byte received from serial port as Number
+    // send_func      ... function that takes Array of Numbers as bytes to send to serial port
+    // log_func       ... function to log low-level send/receive command info
+    // s0_network_key ... Array of 16 numbers
+
+    constructor(recv_func, send_func, log_func, s0_network_key) {
+	this.send_func = send_func;
+	this.recv_func = recv_func;
+	this.log_func = log_func;
+	this.s0_network_key = s0_network_key;
 	this.tx_options = 0x25; // ACK + AUTO_ROUTE + EXPLORE
-	    //[157, 88, 48, 81, 140, 226, 104, 69, 115, 189, 89, 252, 64, 219, 177, 80];
 	this.unsolicited_mutex = new async_mutex();
 	this.api_cmd_mutex = new async_mutex();
 	this.api_cmd_session_id = 1; // counter to increment for each new session
@@ -242,20 +196,6 @@ export class zwave {
     }
 
     async init() {
-	// open serial port
-	const stty_args = ["-F", this.dev_file, "raw", "-parenb", "cs8", "-cstopb", "115200"];
-	const res = new Deno.Command("/usr/bin/stty", {args: stty_args}).outputSync();
-
-	if (!res.success) {
-	    console.log(String.fromCharCode.apply(null, res.stderr));
-	    throw("stty failed");
-	}
-
-	this.serial = Deno.openSync(this.dev_file, {read: true, write: true});
-
-	// S0 keys, use this to generate random key:
-	// Deno.writeFileSync("s0_network_key.bin", crypto.getRandomValues(new Uint8Array(16)));
-	this.s0_network_key = Array.from(Deno.readFileSync("s0_network_key.bin"));
 	this.s0_key = await s0_key_gen(this.s0_network_key);
 	this.s0_temp_key = await s0_key_gen(Array(16).fill(0));
 
@@ -286,56 +226,42 @@ export class zwave {
      *     receive pipeline                                                       *
      ******************************************************************************/
 
-    async recv_byte() {
-	const buf = new Uint8Array(1);
-
-	while (true) {
-	    const d = await this.serial.read(buf);
-
-	    if (d == 1) {
-		let ret = buf[0];
-		this.recv_frame.push(ret);
-		return ret;
-	    } else if (d == null) {
-		throw("serial port closed");
-	    }
-	}
-    }
-
     async recv_loop() {
 	while (true) {
-	    this.recv_frame = [];
-	    const frame_start = await this.recv_byte();
+	    const frame_start = await this.recv_func();
 
 	    if ([zwave.frame_start.ACK, zwave.frame_start.NAK, zwave.frame_start.CAN].includes(frame_start)) {
 		this.recv_ack_nak_can_or_timeout(frame_start);
 	    } else if (frame_start == zwave.frame_start.SOF) {
-		const len = await this.recv_byte();
-		const type = await this.recv_byte();
+		const len = await this.recv_func();
+		const type = await this.recv_func();
+		const recv_frame = [frame_start, len, type];
 		let expected_checksum = 0xff ^ type ^ len;
 
 		for (let i = 2; i < len; ++i) {
-		    expected_checksum ^= await this.recv_byte();
+		    const byte = await this.recv_func();
+		    recv_frame.push(byte);
+		    expected_checksum ^= byte;
 		}
 
-		const checksum = await this.recv_byte();
-		const type_str = zwave.data_frame_type.get_key(type);
-		let frame_str = this.recv_frame.to_hex_bytes();
-		log("\tRX", type_str, frame_str);
+		const checksum = await this.recv_func();
+		const type_str = obj_val_key(zwave.data_frame_type, type);
+		let frame_str = hex_bytes(recv_frame);
+		this.log_func("\tRX", type_str, frame_str);
 
 		if (checksum == expected_checksum) {
 		    if ([zwave.data_frame_type.REQ, zwave.data_frame_type.RES].includes(type)) {
 			this.send_ack_nak(zwave.frame_start.ACK);
-			await this.recv_data_frame(type, this.recv_frame[3], this.recv_frame.slice(4, len + 1));
+			await this.recv_data_frame(type, recv_frame[3], recv_frame.slice(4, len + 1));
 		    } else {
-			log("\tRX ERROR bad type");
+			this.log_func("\tRX ERROR bad type");
 		    }
 		} else {
-		    log("\tRX ERROR bad checksum");
+		    this.log_func("\tRX ERROR bad checksum");
 		    this.send_ack_nak(zwave.frame_start.NAK);
 		}
 	    } else {
-		log("\tRX ERROR unexpected byte", [frame_start].to_hex_bytes());
+		this.log_func("\tRX ERROR unexpected byte", hex_bytes([frame_start]));
 	    }
 	}
     }
@@ -343,7 +269,7 @@ export class zwave {
     recv_ack_nak_can_or_timeout(frame_start) {
 	if (frame_start) {
 	    // not timeout
-	    log("\tRX", zwave.frame_start.get_key(frame_start), [frame_start].to_hex_bytes());
+	    this.log_func("\tRX", obj_val_key(zwave.frame_start, frame_start), hex_bytes([frame_start]));
 	}
 
 	if (this.send_data_frame_resolve) {
@@ -376,7 +302,6 @@ export class zwave {
 	// unsolicited
 	await this.unsolicited_mutex.lock();
 
-	//console.log("recv_data_frame", type, cmd_id);
 	if (type == zwave.data_frame_type.REQ) {
 	    // unsolicited
 	    if (cmd_id == zwave.api_cmd.BRIDGE_COMMAND_HANDLER) {
@@ -384,23 +309,22 @@ export class zwave {
 	    } else if (cmd_id == zwave.api_cmd.APPLICATION_UPDATE) {
 		this.recv_application_update(pld);
 	    } else {
-		log("\tRX ERROR unhandled unsolicited Request");
+		this.log_func("\tRX ERROR unhandled unsolicited Request");
 	    }
 	} else {
-	    log("\tRX ERROR unexpected Response");
+	    this.log_func("\tRX ERROR unexpected Response");
 	}
-	console.log("-".repeat(80));
+	this.log_func();
 
 	this.unsolicited_mutex.unlock();
     }
 
     async recv_bridge_command_handler(pld) {
-	//console.log("recv_bridge_command_handler 1");
 	const msg = "BRIDGE_COMMAND_HANDLER";
 
 	// pld starts with first byte after cmd_id
 	if (pld.length < (6 + (this.nodeid_16bit ? 2 : 0))) {
-	    log(msg, "invalid command (too short)");
+	    this.log_func(msg, "invalid command (too short)");
 	    return;
 	}
 
@@ -410,7 +334,7 @@ export class zwave {
 	const cmd_end = cmd_offset + len;
 
 	if (!((len >= 2) && (cmd_end <= pld.length))) {
-	    log(msg, "invalid command (pld doesn't fit)");
+	    this.log_func(msg, "invalid command (pld doesn't fit)");
 	    return;
 	}
 
@@ -424,17 +348,15 @@ export class zwave {
 		msg: []
 	    };
 
-	    //console.log("recv_bridge_command_handler 2", node.nodeid);
-
 	    try {
 		await node.recv_cmd(cmd);
 	    } catch (error) {
 		console.log(error);
 	    }
 
-	    log(msg, "node:" + node.nodeid, "|", ...cmd.msg);
+	    this.log_func(msg, "node:" + node.nodeid, "|", ...cmd.msg);
 	} else {
-	    log(msg, "non-existent node:" + nodeid);
+	    this.log_func(msg, "non-existent node:" + nodeid);
 	}
     }
 
@@ -443,7 +365,7 @@ export class zwave {
 
 	// pld starts with first byte after cmd_id
 	if (pld.length < (3 + (this.nodeid_16bit ? 1 : 0))) {
-	    log(msg, "invalid command (too short)");
+	    this.log_func(msg, "invalid command (too short)");
 	    return;
 	}
 
@@ -453,13 +375,13 @@ export class zwave {
 	const node = this.nodes.get(nodeid);
 
 	if (node) {
-	    log(msg, "node:" + node.nodeid, "|", event);
+	    this.log_func(msg, "node:" + node.nodeid, "|", event);
 
 	    if (node.application_update) {
 		node.application_update(event);
 	    }
 	} else {
-	    log(msg, "non-existent node:" + nodeid);
+	    this.log_func(msg, "non-existent node:" + nodeid);
 	}
     }
 
@@ -470,18 +392,12 @@ export class zwave {
     // framing
     send_frame(...args) { // args must be numbers or arrays of numbers (incl. nested)
 	args = args.flat(10);
-	let buf = new Uint8Array(args);
-
-	while (buf.length) {
-	    const bytes_written = this.serial.writeSync(buf);
-	    buf = buf.subarray(bytes_written);
-	}
-
-	return args.to_hex_bytes();
+	this.send_func(args);
+	return hex_bytes(args);
     }
 
     async send_data_frame(type, ...args) {
-	const type_str = zwave.data_frame_type.get_key(type);
+	const type_str = obj_val_key(zwave.data_frame_type, type);
 	const args_flat = args.flat(10);
 	const len = args_flat.length + 2;
 	let checksum = 0xff ^ type ^ len;
@@ -494,7 +410,7 @@ export class zwave {
 		this.send_data_frame_resolve = resolve;
 		ack_timeout = new timeout(this.recv_ack_nak_can_or_timeout.bind(this, null), 1600);
 		const frame_str = this.send_frame(zwave.frame_start.SOF, len, type, args_flat, checksum);
-		log("\tTX", type_str, frame_str + ((n > 0) ? (" (retry #" + n + ")") : ""));
+		this.log_func("\tTX", type_str, frame_str + ((n > 0) ? (" (retry #" + n + ")") : ""));
 	    });
 
 	    ack_timeout.cancel();
@@ -511,7 +427,7 @@ export class zwave {
     }
 
     send_ack_nak(frame_start) {
-	log("\tTX", zwave.frame_start.get_key(frame_start), this.send_frame(frame_start));
+	this.log_func("\tTX", obj_val_key(zwave.frame_start, frame_start), this.send_frame(frame_start));
     }
 
     // common API command functions
@@ -534,7 +450,7 @@ export class zwave {
 	}
 
 	// print out what is about to happen
-	log(zwave.api_cmd.get_key(cmd.id), ...(cmd.msg ?? []));
+	this.log_func(obj_val_key(zwave.api_cmd, cmd.id), ...(cmd.msg ?? []));
 	this.unsolicited_mutex.unlock();
 
 	// send command
@@ -558,8 +474,8 @@ export class zwave {
     }
 
     api_cmd_end(cmd_ok, ...msg) {
-	log(cmd_ok ? "OK" : "ERROR", ...msg);
-	console.log("-".repeat(80));
+	this.log_func(cmd_ok ? "OK" : "ERROR", ...msg);
+	this.log_func();
 	this.api_cmd_current.resolve(cmd_ok);
 	delete this.api_cmd_current;
 	this.api_cmd_mutex.unlock();
@@ -598,7 +514,7 @@ export class zwave {
 	    onres: (pld) => {
 		this.home_id = pld.slice(0, 4);
 		this.nodeid = pld[4];
-		this.api_cmd_end(true, "HomeID: " + this.home_id.to_hex_bytes(), "nodeid:" + this.nodeid);
+		this.api_cmd_end(true, "HomeID: " + hex_bytes(this.home_id), "nodeid:" + this.nodeid);
 	    }
 	});
     }
@@ -611,7 +527,7 @@ export class zwave {
 
 		if (node_list_length == (pld.length - 5)) {
 		    const node_list = [];
-		    for (let nodeid of pld.slice(3, 3 + node_list_length).get_bit_list(1)) {
+		    for (let nodeid of get_bit_list(pld.slice(3, 3 + node_list_length), 1)) {
 			this.node(nodeid);
 			node_list.push(nodeid);
 		    }
@@ -664,10 +580,10 @@ export class zwave {
 	    pld: [0xc1],
 	    onreq: (pld) => {
 		switch (pld[0]) {
-		case 0x1: log("Network Inclusion Started"); break;
-		case 0x2: log("Node found"); break;
-		case 0x3: log("Inclusion ongoing (End Node)"); break;
-		case 0x4: log("Inclusion ongoing (Controller Node)"); break;
+		case 0x1: this.log_func("Network Inclusion Started"); break;
+		case 0x2: this.log_func("Node found"); break;
+		case 0x3: this.log_func("Inclusion ongoing (End Node)"); break;
+		case 0x4: this.log_func("Inclusion ongoing (Controller Node)"); break;
 		case 0x5:
 		    nodeid = pld[1]; // TODO support 16-bit
 		    this.api_cmd_end(true, "Inclusion Completed (protocol part) - node:" + nodeid);
@@ -719,10 +635,10 @@ export class zwave {
 	    pld: nodeid ? [0xc1, nodeid] : [0xc1],
 	    onreq: (pld) => {
 		switch (pld[0]) {
-		case 0x1: log("Network Exclusion Started"); break;
-		case 0x2: log("Node found"); break;
-		case 0x3: log("Exclusion ongoing (End Node)"); break;
-		case 0x4: log("Exclusion ongoing (Controller Node)"); break;
+		case 0x1: this.log_func("Network Exclusion Started"); break;
+		case 0x2: this.log_func("Node found"); break;
+		case 0x3: this.log_func("Exclusion ongoing (End Node)"); break;
+		case 0x4: this.log_func("Exclusion ongoing (Controller Node)"); break;
 		case 0x6: this.api_cmd_end(true, "Exclusion completed"); break;
 		default:  this.api_cmd_end(false, "Unexpected status:" + pld[0]);
 		}
@@ -760,7 +676,7 @@ export class zwave {
 	    pld: [nodeid],
 	    onres: (pld) => {
 		switch (pld[0]) {
-		case 0x0: log("Failed node remove started"); break;
+		case 0x0: this.log_func("Failed node remove started"); break;
 		case 0x1: this.api_cmd_end(false, "Not primary controller"); break;
 		case 0x2: this.api_cmd_end(false, "No callback function"); break;
 		case 0x3: this.api_cmd_end(false, "Failed node not found"); break;
@@ -929,7 +845,7 @@ export class zwave_node {
 	}
 
 	cmd.node = this;
-	const cmd_id_str = zwave_node.cmd.get_key(cmd.id);
+	const cmd_id_str = obj_val_key(zwave_node.cmd, cmd.id);
 	cmd.msg.unshift(cmd_id_str);
 	cmd.error_msg = ["nodeid:" + this.nodeid];
 
@@ -949,8 +865,8 @@ export class zwave_node {
 	if (this.s0_enabled) {
 	    if (!await this.s0_encapsulate(cmd)) {
 		// cannot call node_cmd_end because node_cmd_current is not valid
-		log("ERROR", ...cmd.error_msg, "no nonce");
-		console.log("-".repeat(80));
+		this.log_func("ERROR", ...cmd.error_msg, "no nonce");
+		this.log_func();
 		return false;
 	    }
 	}
@@ -983,8 +899,8 @@ export class zwave_node {
 	const cmd = this.node.node_cmd_current;
 
 	if (!cmd_ok) {
-	    log("ERROR", ...cmd.error_msg, ...msg);
-	    console.log("-".repeat(80));
+	    this.log_func("ERROR", ...cmd.error_msg, ...msg);
+	    this.log_func();
 	}
 
 	cmd.resolve(cmd_ok);
@@ -997,7 +913,6 @@ export class zwave_node {
 
 	const key = (cmd.id == zwave_node.cmd.NETWORK_KEY_SET) ? this.z.s0_temp_key : this.z.s0_key;
 	const encrypted_pld = [0 /* seq_info */, cmd.id, cmd.pld ?? []].flat(10);
-	//console.log("before_enc", Array.from(encrypted_pld).to_hex_bytes());
 	cmd.id = zwave_node.cmd.SECURITY_MESSAGE_ENCAPSULATION;
 
 	// get nonce
@@ -1016,21 +931,16 @@ export class zwave_node {
 	    aes_xor(encrypted_pld, offset, vec, 0);
 	}
 
-	//console.log("after_enc", Array.from(encrypted_pld).to_hex_bytes());
-
 	// authentication code
 	vec.fill(0);
 	const auth_data = [sender_nonce, receiver_nonce, cmd.id[1], this.z.nodeid, this.nodeid,
 			   encrypted_pld.length, encrypted_pld].flat();
-	//console.log("auth_data", Array.from(auth_data).to_hex_bytes());
-
 	for (let offset = 0; offset < auth_data.length; offset += 16) {
 	    aes_xor(vec, 0, auth_data, offset);
 	    await aes_ecb(key.auth, vec);
 	}
 
 	const mac = vec.slice(0, 8);
-	//console.log("mac_full", Array.from(vec).to_hex_bytes());
 
 	// encapsulate
 	cmd.pld = [sender_nonce, encrypted_pld, receiver_nonce[0], mac];
@@ -1142,8 +1052,6 @@ export class zwave_node {
 	    }
 	}
 
-	//console.log("recv_cmd", cmd.id, cmd.pld);
-
 	// dispatch
 	if (cmd.id == zwave_node.cmd.MULTI_CHANNEL_CMD_ENCAP) {
 	    await this.recv_multi_channel_cmd_encap(cmd);
@@ -1203,7 +1111,7 @@ export class zwave_node {
     recv_security_nonce_report(cmd) {
 	if (cmd.pld.length == 8) {
 	    const nonce = cmd.pld;
-	    cmd.msg.push("nonce: " + nonce.to_hex_bytes());
+	    cmd.msg.push("nonce: " + hex_bytes(nonce));
 	    this.node.node_cmd_current.retval = nonce;
 	    this.node_cmd_end(true);
 	} else {
@@ -1300,7 +1208,7 @@ export class zwave_node {
 	setTimeout(() => {nonce.length = 0}, 3000);
 
 	this.node.send_node_cmd({
-	    msg: ["nonce: " + nonce.to_hex_bytes()],
+	    msg: ["nonce: " + hex_bytes(nonce)],
 	    id: zwave_node.cmd.SECURITY_NONCE_REPORT,
 	    pld: nonce
 	});
@@ -1329,9 +1237,6 @@ export class zwave_node {
 	const receiver_nonce_id = cmd.pld[receiver_nonce_id_offset];
 	const mac = cmd.pld.slice(receiver_nonce_id_offset + 1);
 
-	//console.log("encrypted_pld", encrypted_pld.to_hex_bytes());
-	//console.log("mac", mac.to_hex_bytes());
-
 	// receiver nonce
 	const receiver_nonce = this.node?.nonce[receiver_nonce_id];
 
@@ -1353,14 +1258,11 @@ export class zwave_node {
 	const auth_data = [sender_nonce, receiver_nonce, cmd.id[1], this.nodeid, this.z.nodeid,
 			   encrypted_pld_len, encrypted_pld].flat();
 
-	//console.log("auth_data", auth_data.to_hex_bytes());
-
 	for (let offset = 0; offset < auth_data.length; offset += 16) {
 	    aes_xor(vec, 0, auth_data, offset);
 	    await aes_ecb(key.auth, vec);
 	}
 
-	//console.log("computed mac", vec.to_hex_bytes());
 	for (let i = 0; i < 8; ++i) {
 	    if (vec[i] != mac[i]) {
 		cmd.msg.push("incorrect MAC");
@@ -1392,7 +1294,6 @@ export class zwave_node {
     }
 
     async recv_multi_channel_cmd_encap(cmd) {
-	//console.log("recv_multi_channel_cmd_encap 1", cmd.pld);
 	if (cmd.pld.length < 4) {
 	    cmd.msg.push("incorrect length");
 	    return;
@@ -1401,10 +1302,8 @@ export class zwave_node {
 	const epid = cmd.pld[0];
 	cmd.id = cmd.pld.slice(2, 4);
 	cmd.pld = cmd.pld.slice(4);
-	//console.log("recv_multi_channel_cmd_encap 2", cmd.id, cmd.pld);
 	cmd.msg.push("ep:" + epid, "|");
 
 	await this.ep(epid).recv_cmd(cmd);
-	//console.log("recv_multi_channel_cmd_encap 3", cmd.msg);
     }
 }
