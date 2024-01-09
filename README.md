@@ -1,19 +1,19 @@
 # Overview
 
-This module is a minimalist implementation of a Z-Wave API to control a simple home network using a USB host controller.
-Unlike the full-featured Node-based implementation that can be found [here](https://github.com/zwave-js), the goal of this project was
-to work in any Javascript runtime with minimal external dependencies for a stable and secure long-term solution with minimal maintenance.
+This module is a minimalist implementation of the Z-Wave API in Javascript to control a simple home network.
+I wanted to use Deno instead of Node.js, but the [full-featured implementation](https://github.com/zwave-js),
+does not run on Deno, plus it is way too bloated (128 npm modules!).
 
-This code is provided in hope that it can be a starting point for similarly-minded enthusiasts. It only implements the Z-Wave commands
-I need in my home network. So any users would be expected to add their own commands with the help of the official specification that
-can be downloaded [here](https://www.silabs.com/wireless/z-wave/specification).
+Currently this module only supports the commands that I need in my network. More commands can be added with the help
+of the public [specification](https://www.silabs.com/wireless/z-wave/specification) docs. Also only
+S0 security is supported. S2 seems far more complex than the time I can afford to invest in this, and the
+limitations of S0 seemed appropriate for my use.
 
 Main features:
- - Single ES module
- - No external dependencies
+ - Single ES module with no external dependencies
  - Uses SubtleCrypto API for encryption
  - Limited set of API and device commands
- - S0 security
+ - S0 security only
 
 API commands supported:
  - Soft Reset
@@ -25,7 +25,9 @@ API commands supported:
  - Remove Specific Node From Network
  - Is Node Failed
  - Remove Failed Node
+ - Application Update
  - Bridge Controller Node Send Data
+ - Bridge Command Handler
 
 Device command classes supported:
  - Switch Binary
@@ -37,7 +39,7 @@ Device command classes supported:
  - Wake Up
  - Security (S0)
 
-Tested on hardware:
+Running on Ubuntu Linux / Deno 1.36.1 using this hardware:
  - Aeotec Z-Stick 7
  - Fibaro Smart Implant (S0 included)
  - Homeseer HS-PA100+ Plug-In Switch
