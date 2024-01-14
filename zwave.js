@@ -121,6 +121,24 @@ function aes_xor(dst, dst_offset, src, src_offset, max_length = 16) {
     }
 }
 
+async function aes_encrypt_ofb(key, vec, data) {
+    for (let offset = 0; offset < data.length; offset += 16) {
+	await aes_ecb(key, vec);
+	aes_xor(data, offset, vec, 0);
+    }
+}
+
+async function aes_cbc_mac(key, data) {
+    const vec = Array(16).fill(0);
+
+    for (let offset = 0; offset < data.length; offset += 16) {
+	aes_xor(vec, 0, data, offset);
+	await aes_ecb(key, vec);
+    }
+
+    return vec.slice(0, 8);
+}
+
 async function s0_key_gen(network_key_raw) {
     const network_key = await aes_key_gen(network_key_raw);
     const auth_key_raw = await aes_ecb(network_key, Array(16).fill(0x55));
@@ -162,6 +180,7 @@ export class zwave {
 	APPLICATION_UPDATE:			0x49,
 	ADD_NODE_TO_NETWORK:			0x4a,
 	REMOVE_NODE_FROM_NETWORK: 		0x4b,
+	REQUEST_NODE_INFORMATION:		0x60,
 	REMOVE_FAILED_NODE:			0x61,
 	IS_NODE_FAILED:				0x62,
 	BRIDGE_COMMAND_HANDLER:			0xa8,
@@ -718,6 +737,20 @@ export class zwave {
 	});
     }
 
+    async request_node_information(nodeid) {
+	return await this.send_api_cmd({
+	    id: zwave.api_cmd.REQUEST_NODE_INFORMATION,
+	    pld: [nodeid],
+	    onres: (pld) => {
+		if ((pld.length == 1) && (pld[0] != 0)) {
+		    this.api_cmd_end(true);
+		} else {
+		    this.api_cmd_end(false, "status:" + pld[0]);
+		}
+	    }
+	});
+    }
+
     // complex flows
     async add_secure_node_to_network() {
 	const nodeid = await this.add_node_to_network();
@@ -924,23 +957,12 @@ export class zwave_node {
 
 	// encrypt
 	const sender_nonce = rand(8);
-	const vec = sender_nonce.concat(receiver_nonce); // Initialization Vector
-
-	for (let offset = 0; offset < encrypted_pld.length; offset += 16) {
-	    await aes_ecb(key.enc, vec);
-	    aes_xor(encrypted_pld, offset, vec, 0);
-	}
+	await aes_encrypt_ofb(key.enc, sender_nonce.concat(receiver_nonce), encrypted_pld);
 
 	// authentication code
-	vec.fill(0);
 	const auth_data = [sender_nonce, receiver_nonce, cmd.id[1], this.z.nodeid, this.nodeid,
 			   encrypted_pld.length, encrypted_pld].flat();
-	for (let offset = 0; offset < auth_data.length; offset += 16) {
-	    aes_xor(vec, 0, auth_data, offset);
-	    await aes_ecb(key.auth, vec);
-	}
-
-	const mac = vec.slice(0, 8);
+	const mac = await aes_cbc_mac(key.auth, auth_data);
 
 	// encapsulate
 	cmd.pld = [sender_nonce, encrypted_pld, receiver_nonce[0], mac];
@@ -1254,29 +1276,19 @@ export class zwave_node {
 
 	// authentication code check
 	const key = this.z.s0_key;
-	let vec = Array(16).fill(0);
 	const auth_data = [sender_nonce, receiver_nonce, cmd.id[1], this.nodeid, this.z.nodeid,
 			   encrypted_pld_len, encrypted_pld].flat();
-
-	for (let offset = 0; offset < auth_data.length; offset += 16) {
-	    aes_xor(vec, 0, auth_data, offset);
-	    await aes_ecb(key.auth, vec);
-	}
+	const expected_mac = await aes_cbc_mac(key.auth, auth_data);
 
 	for (let i = 0; i < 8; ++i) {
-	    if (vec[i] != mac[i]) {
+	    if (expected_mac[i] != mac[i]) {
 		cmd.msg.push("incorrect MAC");
-		//return;
+		return;
 	    }
 	}
 
 	// decrypt
-	vec = sender_nonce.concat(receiver_nonce); // Initialization Vector
-
-	for (let offset = 0; offset < encrypted_pld.length; offset += 16) {
-	    await aes_ecb(key.enc, vec);
-	    aes_xor(encrypted_pld, offset, vec, 0);
-	}
+	await aes_encrypt_ofb(key.enc, sender_nonce.concat(receiver_nonce), encrypted_pld);
 
 	// dispatch encapsulated cmd
 	const seq_info = encrypted_pld[0];
