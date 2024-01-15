@@ -36,8 +36,29 @@ function get_bit_list(arr, index = 0, val = 1) {
     return ret;
 }
 
+function bigint_from_array(arr) {
+    let n = 0n;
+    // little endian
+    for (let i = arr.length - 1; i >= 0; --i) {
+	n = (n << 8n) | BigInt(arr[i]);
+    }
+    return n;
+}
+
+function array_from_bigint(n, bytes = 16) {
+    const arr = [];
+    while (bytes > 0) {
+	arr.push(Number(n & 0xffn))
+    }
+    return arr;
+}
+
 function hex_bytes(arr) {
     return arr.map((e) => (e & 0xff).toString(16).padStart(2, "0")).join(" ");
+}
+
+function array_from_hex(str) {
+    return str.match(/[0-9a-fA-F]{2}/g).map((s) => Number.parseInt(s, 16));
 }
 
 export class timeout {
@@ -128,7 +149,7 @@ async function aes_encrypt_ofb(key, vec, data) {
     }
 }
 
-async function aes_cbc_mac(key, data) {
+async function aes_cbc_mac(key, data, trim_bytes = 8) {
     const vec = Array(16).fill(0);
 
     for (let offset = 0; offset < data.length; offset += 16) {
@@ -136,7 +157,50 @@ async function aes_cbc_mac(key, data) {
 	await aes_ecb(key, vec);
     }
 
-    return vec.slice(0, 8);
+    return vec.slice(0, trim_bytes);
+}
+
+async function aes_cmac(key, data) {
+    data = Array.from(data); // copy because we will modify
+
+    if (!key.cmac_subkey) {
+	key.cmac_subkey = [];
+	const vec = await aes_ecb(key, Array(16).fill(0)); // L
+
+	// generate K1/K2 in identical steps
+	while (key.cmac_subkey.length < 2) {
+	    let overflow = 0;
+
+	    // shift left by 1
+	    for (let i = 15; i >= 0; --i) {
+		vec[i] = (vec[i] << 1) | overflow;
+		overflow = vec[i] >> 8;
+		vec[i] &= 0xff;
+	    }
+
+	    if (overflow) {
+		vec[15] ^= 0x87; // xor with const_Rb
+	    }
+
+	    key.cmac_subkey.push(Array.from(vec));
+	};
+    }
+
+    let subkey = key.cmac_subkey[0]; // K1
+
+    // pad it
+    if ((data.length == 0) || (data.length % 16)) {
+	data.push(0x80);
+
+	while (data.length % 16) {
+	    data.push(0);
+	}
+
+	subkey = key.cmac_subkey[1]; // K2
+    }
+
+    aes_xor(data, data.length - 16, subkey, 0);
+    return await aes_cbc_mac(key, data, 16);
 }
 
 async function s0_key_gen(network_key_raw) {
