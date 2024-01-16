@@ -45,12 +45,25 @@ function bigint_from_array(arr) {
     return n;
 }
 
-function array_from_bigint(n, bytes = 16) {
+function encode_lsb_first(n, bytes) {
     const arr = [];
-    while (bytes > 0) {
+    n = BigInt(n);
+
+    while ((bytes--) > 0) {
 	arr.push(Number(n & 0xffn))
+	n >>= 8n;
     }
+
     return arr;
+}
+
+function encode_msb_first(n, bytes) {
+    return encode_lsb_first(n, bytes).reverse();
+}
+
+function aes_padding(current_length, val = 0) {
+    const len = (aes_blocksize - (current_length % aes_block_size)) % aes_block_size;
+    return Array(len).fill(val);
 }
 
 function hex_bytes(arr) {
@@ -117,42 +130,62 @@ function rand(bytes) {
  *     AES utils                                                              *
  ******************************************************************************/
 
+// - all functions assume AES-128
+// - all buffers are Arrays of Numbers (each element represents a single byte)
+// - resulting buffers modified in place and returned
+
+const aes_blocksize = 16;
+
+// gnerate a block with constant value "val"
+function aes_block(val) {
+    return Array(aes_blocksize).fill(val);
+}
+
+// generate an AES-128 CryptoKey from raw data
 async function aes_key_gen(raw) {
     raw = new Uint8Array(raw);
     return await crypto.subtle.importKey("raw", raw, "AES-CBC", false, ["encrypt"]);
 }
 
+// encode single block "vec" (modified in place) and returne it
 export async function aes_ecb(key, vec) {
     const plaintext = new Uint8Array(vec);
-    const zero_iv = new Uint8Array(16);
+    const zero_iv = new Uint8Array(aes_blocksize);
     const ciphertext = new Uint8Array(await crypto.subtle.encrypt({name: "AES-CBC", iv: zero_iv}, key, plaintext));
 
-    for (let i = 0; i < 16; ++i) {
+    for (let i = 0; i < aes_blocksize; ++i) {
 	vec[i] = ciphertext[i];
     }
 
     return vec;
 }
 
+// XOR vector "dst" (modified in place) with "src" and return it
 function aes_xor(dst, dst_offset, src, src_offset, max_length = 16) {
     const length = Math.min(dst.length - dst_offset, src.length - src_offset, max_length);
 
     for (let i = 0; i < length; ++i) {
 	dst[i + dst_offset] ^= src[i + src_offset];
     }
+
+    return dst;
 }
 
-async function aes_encrypt_ofb(key, vec, data) {
-    for (let offset = 0; offset < data.length; offset += 16) {
-	await aes_ecb(key, vec);
-	aes_xor(data, offset, vec, 0);
+// encrypt "data" (modified in place) using OFB mode and return it
+async function aes_encrypt_ofb(key, iv, data) {
+    for (let offset = 0; offset < data.length; offset += aes_blocksize) {
+	await aes_ecb(key, iv);
+	aes_xor(data, offset, iv, 0);
     }
+
+    return data;
 }
 
+// return CBC-MAC of "data"
 async function aes_cbc_mac(key, data, trim_bytes = 8) {
-    const vec = Array(16).fill(0);
+    const vec = aes_block(0);
 
-    for (let offset = 0; offset < data.length; offset += 16) {
+    for (let offset = 0; offset < data.length; offset += aes_blocksize) {
 	aes_xor(vec, 0, data, offset);
 	await aes_ecb(key, vec);
     }
@@ -160,12 +193,14 @@ async function aes_cbc_mac(key, data, trim_bytes = 8) {
     return vec.slice(0, trim_bytes);
 }
 
-async function aes_cmac(key, data) {
+// return AES-CMAC of "data"
+async function aes_cmac(key, data, trim_bytes = 8) {
     data = Array.from(data); // copy because we will modify
 
+    // generate and cache subkeys in the key object
     if (!key.cmac_subkey) {
 	key.cmac_subkey = [];
-	const vec = await aes_ecb(key, Array(16).fill(0)); // L
+	const vec = await aes_ecb(key, aes_block(0)); // L
 
 	// generate K1/K2 in identical steps
 	while (key.cmac_subkey.length < 2) {
@@ -178,37 +213,138 @@ async function aes_cmac(key, data) {
 		vec[i] &= 0xff;
 	    }
 
-	    if (overflow) {
-		vec[15] ^= 0x87; // xor with const_Rb
-	    }
-
+	    vec[15] ^= overflow ? 0x87 : 0; // xor with const_Rb if overflow
 	    key.cmac_subkey.push(Array.from(vec));
 	};
     }
 
     let subkey = key.cmac_subkey[0]; // K1
 
-    // pad it
-    if ((data.length == 0) || (data.length % 16)) {
-	data.push(0x80);
-
-	while (data.length % 16) {
-	    data.push(0);
-	}
-
+    // in case padding needed
+    if ((data.length == 0) || (data.length % aes_blocksize)) {
+	data.push(0x80, ...aes_padding(data.length + 1));
 	subkey = key.cmac_subkey[1]; // K2
     }
 
-    aes_xor(data, data.length - 16, subkey, 0);
-    return await aes_cbc_mac(key, data, 16);
+    aes_xor(data, data.length - aes_blocksize, subkey, 0); // last block
+    return await aes_cbc_mac(key, data, trim_bytes);
 }
+
+// return CCM-encrypted packet consisting of "aad", encrypted "data" (modified in place) and MAC
+async function aes_encrypt_ccm(key, nonce, aad, data, M = 8, L = 2) {
+    // authentication
+    const auth_flags = 0x40 /* Adata */ + (((M - 2) / 2) << 3) + (L - 1);
+    const auth_data = [auth_flags, nonce, encode_msb_first(data.length, L),
+		       encode_msb_first(aad.length, 2), aad, aes_padding(aad.length + 2),
+		       data, aes_padding(data.length)].flat();
+    const T = await aes_cbc_mac(key, auth_data);
+
+    // encrypt data
+    const enc_flags = L - 1;
+    for (let offset = 0; offset < data.length; offset += aes_blocksize) {
+	const A = [enc_flags, nonce, encode_msb_first((offset / aes_blocksize ) + 1, 2)].flat();
+	aes_xor(data, offset, await aes_ecb(key, A), 0);
+    }
+
+    // encrypt MAC and concatenate all
+    aes_xor(T, 0, await aes_ecb(key, [enc_flags, nonce, 0, 0].flat()), 0);
+    return [aad, data, T.slice(0, M)].flat();
+}
+
+// CTR_DRBG random number generator
+class aes_ctr_drbg {
+    async init(seed) {
+	this.K = await aes_key_gen(aes_block(0));
+	this.V = aes_block(0);
+	await this.update(seed);
+    }
+
+    async step() {
+	for (let i = 15; (i >= 0) && ((++V[i]) == 256); --i) V[i] = 0; // increment V
+	return await aes_ecb(this.K, Array.from(this.V)); // encrypt V
+    }
+
+    async update(data) {
+	aes_xor(data, 0, await this.step(), 0);
+	aes_xor(data, aes_blocksize, await this.step(), 0);
+	this.K = await aes_key_gen(data.slice(0, aes_blocksize));
+	this.V = data.slice(aes_blocksize);
+    }
+
+    async gen(bytes) {
+	const data = [];
+
+	while (data.length < bytes) {
+	    data.push(...await this.step());
+	}
+
+	await this.update(aes_block(0))
+	return data.slice(0, bytes);
+    }
+}
+
+/******************************************************************************
+ *     security utils                                                         *
+ ******************************************************************************/
 
 async function s0_key_gen(network_key_raw) {
     const network_key = await aes_key_gen(network_key_raw);
-    const auth_key_raw = await aes_ecb(network_key, Array(16).fill(0x55));
-    const enc_key_raw = await aes_ecb(network_key, Array(16).fill(0xaa));
+    const auth_key_raw = await aes_ecb(network_key, aes_block(0x55));
+    const enc_key_raw = await aes_ecb(network_key, aes_block(0xaa));
 
-    return {auth: await aes_key_gen(auth_key_raw), enc:  await aes_key_gen(enc_key_raw)}
+    return {auth: await aes_key_gen(auth_key_raw), enc: await aes_key_gen(enc_key_raw)}
+}
+
+function s2_curve25519_scalarmult(k, u) {
+    k = bigint_from_array(k);
+    u = bigint_from_array(u);
+
+    // curve25519 constants
+    const p = 2n**255n - 19n;
+    const A = 486662n;
+    const A_minus2_div4 = (A - 2n) / 4n;
+
+    // modular arithmetic
+    const fadd = (a, b) => (a + b) % p;
+    const fsub = (a, b) => (p + a - b) % p;
+    const fmul = (a, b) => (a * b) % p;
+    const fpow2 = (a) => fmul(a, a);
+    const fpow = (a, b) => (b == 1) ? a : fmul(fpow2(fpow(a, b >> 1n)), (b & 1n) ? a : 1n);
+    const fdiv = (a, b) => fmul(a, fpow(b, p - 2n));
+
+    // clamp key
+    k = (k | 2n**254n) & (2n**255n - 8n);
+
+    // Montgomery ladder - loop through bits of k
+    let [a, b, c, d] = [1n, u, 0n, 1n];
+
+    for (let i = 254n; i >= 0n; --i) {
+	const swap = (k >> i) & 1n;
+	[a, b, c, d] = swap ? [b, a, d, c] : [a, b, c, d];
+
+	let e = fadd(a, c);
+	a = fsub(a, c);
+	c = fadd(b, d);
+	b = fsub(b, d);
+	d = fpow2(e);
+	let f = fpow2(a);
+	a = fmul(c, a);
+	c = fmul(b, e);
+	e = fadd(a, c);
+	a = fsub(a, c);
+	b = fpow2(a);
+	c = fsub(d, f);
+	a = fmul(c, A_minus2_div4);
+	a = fadd(a, d);
+	c = fmul(c, a);
+	a = fmul(d, f);
+	d = fmul(b, u);
+	b = fpow2(e);
+
+	[a, b, c, d] = swap ? [b, a, d, c] : [a, b, c, d];
+    }
+
+    return encode_lsb_first(fdiv(a, c), 16);
 }
 
 /******************************************************************************
@@ -280,7 +416,7 @@ export class zwave {
 
     async init() {
 	this.s0_key = await s0_key_gen(this.s0_network_key);
-	this.s0_temp_key = await s0_key_gen(Array(16).fill(0));
+	this.s0_temp_key = await s0_key_gen(aes_block(0));
 
 	// start receive loop in backdround
 	this.recv_loop();
@@ -565,7 +701,7 @@ export class zwave {
     }
 
     encode_nodeid(nodeid) {
-	return this.nodeid_16bit ? [(nodeid >> 8) & 0xff, nodeid & 0xff] : [nodeid & 0xff];
+	return encode_msb_first(nodeid, this.nodeid_16bit ? 2 : 1);
     }
 
     // API commands
