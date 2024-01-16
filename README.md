@@ -2,12 +2,13 @@
 
 This module is a minimalist implementation of the Z-Wave API in Javascript to control a simple home network.
 I wanted to use Deno instead of Node.js, but the [full-featured implementation](https://github.com/zwave-js),
-does not run on Deno, plus it is way too bloated (128 npm modules!).
+does not run on Deno, plus it is just so overcomplicated - 128 npm modules for 60MB!
 
-Currently this module only supports the commands that I need in my network. More commands can be added with the help
-of the public [specification](https://www.silabs.com/wireless/z-wave/specification) docs. Also only
-S0 security is supported. S2 seems far more complex than the time I can afford to invest in this, and the
-limitations of S0 seemed appropriate for my use.
+Currently this module only supports the command classes that I need in my network. More classes can be added with the help
+of the public [specification](https://www.silabs.com/wireless/z-wave/specification) docs, although I should probably split
+those into separate modules eventually. Also for now only S0 security is supported.
+S0 seems appropriate for what I need, but I decided to work on S2 for the sake of completeness.
+So far I believe I have all the building blocks implemented.
 
 Main features:
  - Single ES module with no external dependencies
