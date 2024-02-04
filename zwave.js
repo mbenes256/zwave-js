@@ -1034,17 +1034,11 @@ export class zwave {
     }
 
     // complex flows
-    async add_secure_node_to_network() {
+    async add_s0_node_to_network() {
 	const nodeid = await this.add_node_to_network();
 
-	if (!nodeid) {
-	    return false;
-	}
-
-	const node = this.node(nodeid);
-
-	if (await node.security_scheme_get()) {
-	   return await node.network_key_set();
+	if (nodeid) {
+	    return await zwave_cc.SECURITY.inclusion(this.node(nodeid));
 	}
 
 	return false;
@@ -1060,16 +1054,19 @@ export class zwave_node {
 	this.z = z;
 	this.nodeid = nodeid;
 	this.mutex = new async_mutex();
-	this.recv = {}; // user populates with receive callbacks
 
-	// populate request and receive functions
+	// this object will be populated with receive callbacks
+	this.recv = {};
+
+	// let each class initialize its data structures
+	for (let cc_def of zwave_cc._cc_id_map.values()) {
+	    cc_def.init?.(this);
+	}
+
+	// populate request functions
 	for (let [cmd_name, cmd_def] of zwave_cc._cmd_name_map.entries()) {
 	    if (cmd_def.encode) {
 		this[cmd_name] = this.run_cmd.bind(this, cmd_def);
-	    }
-
-	    if (cmd_def.recv) {
-		this.recv[cmd_name] = cmd_def.recv.bind(this);
 	    }
 	}
     }
@@ -1079,22 +1076,18 @@ export class zwave_node {
 	let cmd = await this.gen_cmd(cmd_def, args);
 	const cmd_orig = cmd;
 
-	// encapsulation
+	// encapsulate
 	if (options.epid > 0) {
 	    cmd_orig.epid = options.epid;
-	    cmd = await this.gen_cmd(zwave_cc.MULTI_CHANNEL.MULTI_CHANNEL_CMD_ENCAP, {cmd, epid: options.epid});
+	    cmd = await zwave_cc.MULTI_CHANNEL.encapsulate(cmd);
 	}
 
 	if (options.security == 0) {
-	    const key = (cmd_def == zwave_cc.SECURITY.NETWORK_KEY_SET) ? this.z.s0_temp_key : this.z.s0_key;
-	    const report = await this.run_cmd(zwave_cc.SECURITY.SECURITY_NONCE_GET);
+	    cmd = await zwave_cc.SECURITY.encapsulate(cmd);
 
-	    if (!report) {
-		return this.error("no receiver_nonce for S0 encapsulation", cmd_orig);
+	    if (typeof(cmd) == "string") {
+		return this.error(cmd, cmd_orig);
 	    }
-
-	    const receiver_nonce = report.nonce;
-	    cmd = await this.gen_cmd(zwave_cc.SECURITY.SECURITY_MESSAGE_ENCAPSULATION, {cmd, key, receiver_nonce});
 	}
 
 	// shortcut for report commands to avoid deadlock
@@ -1102,23 +1095,25 @@ export class zwave_node {
 	    return await this.z.bridge_node_send(cmd);
 	}
 
-	// allow requests only one at a time
+	// requests allowed only one at a time
 	await this.mutex.lock();
 	this.cmd_current = cmd_orig;
-	const report_val = await this.send_and_report_cmd(cmd);
+	const report = await this.send_and_report_cmd(cmd);
 	delete this.cmd_current;
 	this.mutex.unlock();
 
-	if (typeof(report_val) == "string") {
-	    return this.error(report_val, cmd_orig);
+	if (typeof(report) == "string") {
+	    return this.error(report, cmd_orig);
 	}
 
-	return report_val;
+	return report;
     }
 
+    // generate command object, including encoding
     async gen_cmd(cmd_def, args) {
 	const cmd = {
 	    node: this,
+	    def: cmd_def,
 	    id: [cmd_def.cc.id, cmd_def.id],
 	    args: args,
 	    msg: [cmd_def.name],
@@ -1140,21 +1135,24 @@ export class zwave_node {
 
     async send_and_report_cmd(cmd) {
 	if (!await this.z.bridge_node_send(cmd)) {
+	    // send failed
 	    return false;
 	}
 
+	// retrieve original non-encapsulated command
 	const cmd_orig = this.cmd_current;
 
 	if (!cmd_orig.report_cmd) {
+	    // not expecting report
 	    return true;
 	}
 
 	// wait for report
 	const report_promise = new Promise((resolve) => {cmd_orig.report = resolve});
 	const cmd_timeout = new timeout(cmd_orig.report.bind(null, "timeout"), 1000 * (cmd_orig.timeout ?? 1));
-	const report_val = await report_promise;
+	const report = await report_promise;
 	cmd_timeout.cancel();
-	return report_val;
+	return report;
     }
 
     async recv_cmd(cmd) {
@@ -1162,10 +1160,11 @@ export class zwave_node {
 	let cmd_def;
 
 	while (true) {
+	    // decode
 	    cmd_def = zwave_cc._cc_id_map.get(cmd.id[0])?._cmd_id_map.get(cmd.id[1]);
 
 	    if (!cmd_def?.decode) {
-		cmd.msg.push("unsupported for receive", hex_bytes(cmd.id));
+		cmd.msg.push("unsupported command for receive:", hex_bytes(cmd.id));
 		return;
 	    }
 
@@ -1178,17 +1177,13 @@ export class zwave_node {
 	    }
 
 	    if (!cmd.args.cmd) {
+		// not encapuslated
 		break;
 	    }
 
 	    // encapsulated - replace id/pld and repeat
 	    cmd.id = cmd.args.cmd.id;
 	    cmd.pld = cmd.args.cmd.pld;
-
-	    if (cmd.args.epid > 0) {
-		// save the epid
-		cmd.epid = cmd.args.epid;
-	    }
 	}
 
 	// check if this is a report for a current request
@@ -1202,6 +1197,7 @@ export class zwave_node {
 		cmd.args.epid = cmd.epid;
 	    }
 
+	    // user callback
 	    this.recv[cmd_def.name]?.(cmd.args);
 	}
     }
@@ -1216,14 +1212,16 @@ const zwave_cc = {
 	this._cc_id_map = new Map();
 	this._cmd_name_map = new Map();
 
+	// loop through classes
 	for (let [cc_name, cc_def] of Object.entries(this)) {
 	    if (cc_def.id != undefined) {
 		this._cc_id_map.set(cc_def.id, cc_def);
 		cc_def.name = cc_name;
 		cc_def._cmd_id_map = new Map();
 
-		for (let [cmd_name, cmd_def] of Object.entries(cc_def)) {
-		    if ((cmd_name != "id") && (cmd_def.id != undefined)) {
+		// loop through commands
+		for (let [cmd_name, cmd_def] of Object.entries(cc_def.cmd)) {
+		    if (cmd_def.id != undefined) {
 			cc_def._cmd_id_map.set(cmd_def.id, cmd_def);
 			cmd_def.name = cmd_name;
 			cmd_def.cc = cc_def;
@@ -1269,16 +1267,25 @@ const zwave_cc = {
  * command class definitions
  *
  * zwave_cc properties:
+ *   <class_name>: class definition object
+ *
+ * class definition properties:
  *   id: <class id as number>
- *   <COMMAND_NAME>: <command definition object>
+ *   init(node): optional function that initializes a node with structures used by the class
+ *   inclusion(node): optional function to run security inclusion flow
+ *   emcapsulate(cmd): optional function that encapsulates command according to the class
+ *   cmd: command dictionary
+ *
+ * command dictionary properties:
+ *   <COMMAND_NAME>: command definition object
  *
  * command definition object properties:
  *   id: <command id as number>
  *   report_cmd: <string name of command that is a response to this command>
  *   encode_fmt: format definition object to encode commands for sending
  *   decode_fmt: format definition object to decode received commands
- *   encode: function that encodes complex commands, takes command object as argument
- *   decode: function that decodes complex commands, takes command object as argument
+ *   encode(cmd): function that encodes complex commands, takes command object as argument
+ *   decode(cmd): function that decodes complex commands, takes command object as argument
  *
  * format definition object:
  *   <param_name>: number of bytes consumed by parameter
@@ -1292,72 +1299,79 @@ const zwave_cc = {
  *   msg: array of values to print to log (append by encode() and decode())
  *   pld: encoded payload as array of byte numbers (generate in encode(), consume in decode())
  *   args: object defining command parameters (consume in encode(), generate in decode())
+ *   epid: multi-channel endpoint id
  */
 
 zwave_cc.BINARY_SWITCH = {
     id: 0x25,
-    SWITCH_BINARY_SET: {id: 0x01, encode_fmt: {value: 1}},
-    SWITCH_BINARY_GET: {id: 0x02, encode_fmt: {}, report_cmd: "SWITCH_BINARY_REPORT"},
-    SWITCH_BINARY_REPORT: {id: 0x03, decode_fmt: [{value: 1, target: 1, duration: 1}, {value: 1}]}
+    cmd: {
+	SWITCH_BINARY_SET: {id: 0x01, encode_fmt: {value: 1}},
+	SWITCH_BINARY_GET: {id: 0x02, encode_fmt: {}, report_cmd: "SWITCH_BINARY_REPORT"},
+	SWITCH_BINARY_REPORT: {id: 0x03, decode_fmt: [{value: 1, target: 1, duration: 1}, {value: 1}]}
+    }
 };
 
 zwave_cc.BINARY_SENSOR = {
     id: 0x30,
-    SENSOR_BINARY_REPORT: {id: 0x03, decode_fmt: [{value: 1, type: 1}, {value: 1}]}
+    cmd: {
+	SENSOR_BINARY_REPORT: {id: 0x03, decode_fmt: [{value: 1, type: 1}, {value: 1}]}
+    }
 };
 
 zwave_cc.CONFIGURATION = {
     id: 0x70,
-    CONFIGURATION_SET: {
-	id: 0x04,
-	encode(cmd) {
-	    const [param, size, value] = [cmd.args.param & 0xff, cmd.args.size, cmd.args.value];
-	    if (![1, 2, 4].includes(size)) {
-		throw("unsupported size: " + size);
+    cmd: {
+	CONFIGURATION_SET: {
+	    id: 0x04,
+	    encode(cmd) {
+		const [param, size, value] = [cmd.args.param & 0xff, cmd.args.size, cmd.args.value];
+		if (![1, 2, 4].includes(size)) {
+		    throw("unsupported size: " + size);
+		}
+
+		const val_buf = new Uint8Array(size);
+		const dv = new DataView(val_buf.buffer);
+
+		if (size == 1) {
+		    dv.setInt8(0, value);
+		} else if (size == 2) {
+		    dv.setInt16(0, value);
+		} else {
+		    dv.setInt32(0, value);
+		}
+
+		cmd.pld = [param, size, Array.from(val_buf)],
+		cmd.msg.push("param:" + param, "size:" + size, "value:" + value);
 	    }
+	},
+	CONFIGURATION_GET: {id: 0x05, report_cmd: "CONFIGURATION_REPORT", encode_fmt: {param: 1}},
+	CONFIGURATION_REPORT: {
+	    id: 0x06,
+	    decode(cmd) {
+		let value, param, size;
 
-	    const val_buf = new Uint8Array(size);
-	    const dv = new DataView(val_buf.buffer);
+    		if (cmd.pld.length >= 3) {
+		    param = cmd.pld[0];
+		    size = cmd.pld[1];
+		    const dv = new DataView((new Uint8Array(cmd.pld.slice(2))).buffer);
 
-	    if (size == 1) {
-		dv.setInt8(0, value);
-	    } else if (size == 2) {
-		dv.setInt16(0, value);
-	    } else {
-		dv.setInt32(0, value);
-	    }
-
-	    cmd.pld = [param, size, Array.from(val_buf)],
-	    cmd.msg.push("param:" + param, "size:" + size, "value:" + value);
-	}
-    },
-    CONFIGURATION_GET: {id: 0x05, report_cmd: "CONFIGURATION_REPORT", encode_fmt: {param: 1}},
-    CONFIGURATION_REPORT: {
-	id: 0x06,
-	decode(cmd) {
-	    let value, param, size;
-
-    	    if (cmd.pld.length >= 3) {
-		param = cmd.pld[0];
-		size = cmd.pld[1];
-		const dv = new DataView((new Uint8Array(cmd.pld.slice(2))).buffer);
-
-		if (size <= dv.byteLength) {
-		    if (size == 1) {
-			value = dv.getInt8(0);
-		    } else if (size == 2) {
-			value = dv.getInt16(0);
-		    } else if (size == 4) {
-			value = dv.getInt32(0);
+		    if (size <= dv.byteLength) {
+			if (size == 1) {
+			    value = dv.getInt8(0);
+			} else if (size == 2) {
+			    value = dv.getInt16(0);
+			} else if (size == 4) {
+			    value = dv.getInt32(0);
+			}
 		    }
 		}
-	    }
 
-	    if (value != undefined) {
-		cmd.args = {param, size, value};
-		cmd.msg.push("param:" + param, "size:" + size, "value:" + value);
-	    } else {
-		cmd.msg.push("bad encoding");
+		if (value != undefined) {
+		    cmd.args = {param, size, value};
+		    cmd.msg.push("param:" + param, "size:" + size, "value:" + value);
+		} else {
+		    cmd.msg.push("bad encoding");
+		}
 	    }
 	}
     }
@@ -1365,162 +1379,198 @@ zwave_cc.CONFIGURATION = {
 
 zwave_cc.BATTERY = {
     id: 0x80,
-    BATTERY_GET: {id: 0x02, encode_fmt: {}, report_cmd: "BATTERY_REPORT"},
-    BATTERY_REPORT: {id: 0x03, decode_fmt: [{level: 1, flags: 2}, {level: 1}]}
+    cmd: {
+	BATTERY_GET: {id: 0x02, encode_fmt: {}, report_cmd: "BATTERY_REPORT"},
+	BATTERY_REPORT: {id: 0x03, decode_fmt: [{level: 1, flags: 2}, {level: 1}]}
+    }
 };
 
 zwave_cc.NOTIFICATION = {
     id: 0x71,
-    NOTIFICATION_REPORT: {id: 0x05, decode_fmt: {__unused1: 4, type: 1, state: 1, __unused2: 0}}
+    cmd: {
+	NOTIFICATION_REPORT: {id: 0x05, decode_fmt: {__unused1: 4, type: 1, state: 1, __unused2: 0}}
+    }
 };
 
 zwave_cc.WAKE_UP = {
     id: 0x84,
-    WAKE_UP_NOTIFICATION: {id: 0x07, decode_fmt: {}}
+    cmd: {
+	WAKE_UP_NOTIFICATION: {id: 0x07, decode_fmt: {}}
+    }
 };
 
 zwave_cc.MULTI_CHANNEL = {
     id: 0x60,
-    MULTI_CHANNEL_CMD_ENCAP: {
-	id: 0x0d,
-	encode(cmd) {
-	    cmd.pld = [0, cmd.args.epid, cmd.args.cmd.id, cmd.args.cmd.pld].flat();
-	    cmd.msg.push("epid:" + cmd.args.epid, "|", ...cmd.args.cmd.msg);
-	},
-	decode(cmd) {
-	    if (cmd.pld.length < 4) {
-		cmd.msg.push("bad encoding");
-		return;
-	    }
+    async encapsulate(cmd) {
+	return await cmd.node.gen_cmd(this.cmd.MULTI_CHANNEL_CMD_ENCAP, {cmd});
+    },
+    cmd: {
+	MULTI_CHANNEL_CMD_ENCAP: {
+	    id: 0x0d,
+	    encode(cmd) {
+		cmd.pld = [0, cmd.args.cmd.epid, cmd.args.cmd.id, cmd.args.cmd.pld].flat();
+		cmd.msg.push("epid:" + cmd.args.cmd.epid, "|", ...cmd.args.cmd.msg);
+	    },
+	    decode(cmd) {
+		if (cmd.pld.length < 4) {
+		    cmd.msg.push("bad encoding");
+		    return;
+		}
 
-	    cmd.args = {epid: cmd.pld[0], cmd: {id: cmd.pld.slice(2, 4), pld: cmd.pld.slice(4)}};
-	    cmd.msg.push("epid:" + cmd.args.epid, "|");
+		cmd.epid = cmd.pld[0];
+		cmd.args = {cmd: {id: cmd.pld.slice(2, 4), pld: cmd.pld.slice(4)}};
+		cmd.msg.push("epid:" + cmd.epid, "|");
+	    }
 	}
     }
 };
 
 zwave_cc.SECURITY = {
     id: 0x98,
-    SECURITY_SCHEME_GET: {id: 0x04, report_cmd: "SECURITY_SCHEME_REPORT", encode_fmt: {supported: 1}},
-    SECURITY_SCHEME_REPORT: {id: 0x05, decode_fmt: {supported: 1}},
-    NETWORK_KEY_SET: {id: 0x06, report_cmd: "NETWORK_KEY_VERIFY", encode_fmt: {key: 16}},
-    NETWORK_KEY_VERIFY: {id: 0x07, decode_fmt: {}},
-    SECURITY_NONCE_GET: {
-	id: 0x40, report_cmd: "SECURITY_NONCE_REPORT",	encode_fmt: {}, decode_fmt: {},
-	recv(args) { // this = node
-	    if (!this.nonce) {
-		this.nonce = Array(256);
-		this.nonce_id = 0;
-            }
-
-            const nonce_id = (this.nonce_id + 1) % 256;
-            const nonce = rand(8);
-            nonce[0] = nonce_id;
-            this.nonce[nonce_id] = nonce;
-            this.nonce_id = nonce_id;
-
-            // disable after 3 seconds
-            setTimeout(() => {nonce.length = 0}, 3000);
-
-	    // send
-	    this.SECURITY_NONCE_REPORT({nonce});
+    init(node) {
+	node.s0 = {nonce: Array(256), nonce_id: 0};
+	node.recv.SECURITY_NONCE_GET = this.send_nonce_report.bind(null, node);
+    },
+    async inclusion(node) {
+	if (await node.SECURITY_SCHEME_GET()) {
+	    return await node.NETWORK_KEY_SET({key: node.z.s0_key});
 	}
     },
-    SECURITY_NONCE_REPORT: {id: 0x80, encode_fmt: {nonce: 8}, decode_fmt: {nonce: 8}},
-    SECURITY_MESSAGE_ENCAPSULATION: {
-	id: 0x81,
-	async encode(cmd) {
-	    // encrypt
-	    const encrypted_pld = [0 /* seq_info */, cmd.args.cmd.id, cmd.args.cmd.pld ?? []].flat(10);
-	    const sender_nonce = rand(8);
-	    const receiver_nonce = cmd.args.receiver_nonce;
-	    await aes_encrypt_ofb(cmd.args.key.enc, sender_nonce.concat(receiver_nonce), encrypted_pld);
+    send_nonce_report(node) {
+        const nonce_id = (node.s0.nonce_id + 1) % 256;
+        const nonce = rand(8);
+        nonce[0] = nonce_id;
+        node.s0.nonce[nonce_id] = nonce;
+        node.s0.nonce_id = nonce_id;
 
-	    // authentication code
-	    const auth_data = [sender_nonce, receiver_nonce, cmd.id[1],
-			       cmd.node.z.nodeid, cmd.node.nodeid, encrypted_pld.length, encrypted_pld].flat();
-	    const mac = await aes_cbc_mac(cmd.args.key.auth, auth_data);
+        // disable after 3 seconds
+        setTimeout(() => {nonce.length = 0}, 3000);
 
-	    // encapsulate
-	    cmd.pld = [sender_nonce, encrypted_pld, receiver_nonce[0], mac];
-	    cmd.msg.push("|", ...cmd.args.cmd.msg);
-	},
-	async decode(cmd) {
-	    const encrypted_pld_len = cmd.pld.length - 17; // IV, MAC, receiver nonce identifier not included
+	// send
+	node.SECURITY_NONCE_REPORT({nonce});
+    },
+    async encapsulate(cmd) {
+	const node = cmd.node;
+	const z = node.z;
+	const key = (cmd.def == this.cmd.NETWORK_KEY_SET) ? z.s0_temp_key : z.s0_key;
+	const report = await cmd.node.run_cmd(this.cmd.SECURITY_NONCE_GET);
 
-	    if (encrypted_pld_len < 3) {
-		cmd.msg.push("bad encoding");
-		return;
-	    }
+	if (!report) {
+	    return "no receiver_nonce for S0 encapsulation";
+	}
 
-	    // extract fields
-	    const sender_nonce = cmd.pld.slice(0, 8);
-	    const receiver_nonce_id_offset = 8 + encrypted_pld_len;
-	    const encrypted_pld = cmd.pld.slice(8, receiver_nonce_id_offset);
-	    const receiver_nonce_id = cmd.pld[receiver_nonce_id_offset];
-	    const mac = cmd.pld.slice(receiver_nonce_id_offset + 1);
+	const receiver_nonce = report.nonce;
+	return await node.gen_cmd(this.cmd.SECURITY_MESSAGE_ENCAPSULATION, {cmd, key, receiver_nonce});
+    },
+    cmd: {
+	SECURITY_SCHEME_GET: {id: 0x04, report_cmd: "SECURITY_SCHEME_REPORT", encode_fmt: {supported: 1}},
+	SECURITY_SCHEME_REPORT: {id: 0x05, decode_fmt: {supported: 1}},
+	NETWORK_KEY_SET: {id: 0x06, report_cmd: "NETWORK_KEY_VERIFY", encode_fmt: {key: 16}},
+	NETWORK_KEY_VERIFY: {id: 0x07, decode_fmt: {}},
+	SECURITY_NONCE_GET: {id: 0x40, report_cmd: "SECURITY_NONCE_REPORT", encode_fmt: {}, decode_fmt: {}},
+	SECURITY_NONCE_REPORT: {id: 0x80, encode_fmt: {nonce: 8}, decode_fmt: {nonce: 8}},
+	SECURITY_MESSAGE_ENCAPSULATION: {
+	    id: 0x81,
+	    async encode(cmd) {
+		// encrypt
+		const encrypted_pld = [0 /* seq_info */, cmd.args.cmd.id, cmd.args.cmd.pld ?? []].flat(10);
+		const sender_nonce = rand(8);
+		const receiver_nonce = cmd.args.receiver_nonce;
+		await aes_encrypt_ofb(cmd.args.key.enc, sender_nonce.concat(receiver_nonce), encrypted_pld);
 
-	    // receiver nonce
-	    const receiver_nonce = cmd.node.nonce[receiver_nonce_id];
+		// authentication code
+		const auth_data = [sender_nonce, receiver_nonce, cmd.id[1],
+				   cmd.node.z.nodeid, cmd.node.nodeid, encrypted_pld.length, encrypted_pld].flat();
+		const mac = await aes_cbc_mac(cmd.args.key.auth, auth_data);
 
-	    if (!receiver_nonce) {
-		cmd.msg.push("no receiver nonce:" + receiver_nonce_id);
-		return;
-	    }
+		// encapsulate
+		cmd.pld = [sender_nonce, encrypted_pld, receiver_nonce[0], mac];
+		cmd.msg.push("|", ...cmd.args.cmd.msg);
+	    },
+	    async decode(cmd) {
+		const encrypted_pld_len = cmd.pld.length - 17; // IV, MAC, receiver nonce identifier not included
 
-	    delete cmd.node.nonce[receiver_nonce_id];
-
-	    if (receiver_nonce.length < 8) {
-		cmd.msg.push("receiver nonce expired");
-		return;
-	    }
-
-	    // authentication code check
-	    const key = cmd.node.z.s0_key;
-	    const auth_data = [sender_nonce, receiver_nonce, cmd.id[1], cmd.node.nodeid, cmd.node.z.nodeid,
-			       encrypted_pld_len, encrypted_pld].flat();
-	    const expected_mac = await aes_cbc_mac(key.auth, auth_data);
-
-	    for (let i = 0; i < 8; ++i) {
-		if (expected_mac[i] != mac[i]) {
-		    cmd.msg.push("incorrect MAC");
+		if (encrypted_pld_len < 3) {
+		    cmd.msg.push("bad encoding");
 		    return;
 		}
+
+		// extract fields
+		const sender_nonce = cmd.pld.slice(0, 8);
+		const receiver_nonce_id_offset = 8 + encrypted_pld_len;
+		const encrypted_pld = cmd.pld.slice(8, receiver_nonce_id_offset);
+		const receiver_nonce_id = cmd.pld[receiver_nonce_id_offset];
+		const mac = cmd.pld.slice(receiver_nonce_id_offset + 1);
+
+		// receiver nonce
+		const receiver_nonce = cmd.node.s0.nonce[receiver_nonce_id];
+
+		if (!receiver_nonce) {
+		    cmd.msg.push("no receiver nonce:" + receiver_nonce_id);
+		    return;
+		}
+
+		delete cmd.node.s0.nonce[receiver_nonce_id];
+
+		if (receiver_nonce.length < 8) {
+		    cmd.msg.push("receiver nonce expired");
+		    return;
+		}
+
+		// authentication code check
+		const key = cmd.node.z.s0_key;
+		const auth_data = [sender_nonce, receiver_nonce, cmd.id[1], cmd.node.nodeid, cmd.node.z.nodeid,
+				   encrypted_pld_len, encrypted_pld].flat();
+		const expected_mac = await aes_cbc_mac(key.auth, auth_data);
+
+		for (let i = 0; i < 8; ++i) {
+		    if (expected_mac[i] != mac[i]) {
+			cmd.msg.push("incorrect MAC");
+			return;
+		    }
+		}
+
+		// decrypt
+		await aes_encrypt_ofb(key.enc, sender_nonce.concat(receiver_nonce), encrypted_pld);
+
+		// dispatch encapsulated cmd
+		const seq_info = encrypted_pld[0];
+
+		if (seq_info != 0) {
+		    cmd.msg.push("unexpected sequence byte:" + seq_info);
+		    return;
+		}
+
+		cmd.args = {cmd: {id: encrypted_pld.slice(1, 3), pld: encrypted_pld.slice(3)}};
+		cmd.msg.push("|");
 	    }
-
-	    // decrypt
-	    await aes_encrypt_ofb(key.enc, sender_nonce.concat(receiver_nonce), encrypted_pld);
-
-	    // dispatch encapsulated cmd
-	    const seq_info = encrypted_pld[0];
-
-	    if (seq_info != 0) {
-		cmd.msg.push("unexpected sequence byte:" + seq_info);
-		return;
-	    }
-
-	    cmd.args = {cmd: {id: encrypted_pld.slice(1, 3), pld: encrypted_pld.slice(3)}};
-	    cmd.msg.push("|");
 	}
     }
 };
 
 zwave_cc.SECURITY_2 = {
     id: 0x9f,
-    SECURITY_2_NONCE_GET: {id: 0x01},
-    SECURITY_2_NONCE_REPORT: {id: 0x02},
-    SECURITY_2_MESSAGE_ENCAPSULATION: {id: 0x03},
-    KEX_GET: {id: 0x04},
-    KEX_REPORT: {id: 0x05},
-    KEX_SET: {id: 0x06},
-    KEX_FAIL: {id: 0x07},
-    PUBLIC_KEY_REPORT: {id: 0x08},
-    SECURITY_2_NETWORK_KEY_GET: {id: 0x09},
-    SECURITY_2_NETWORK_KEY_REPORT: {id: 0x0a},
-    SECURITY_2_NETWORK_KEY_VERIFY: {id: 0x0b},
-    SECURITY_2_TRANSFER_END: {id: 0x0c},
-    SECURITY_2_COMMANDS_SUPPORTED_GET: {id: 0x0d},
-    SECURITY_2_COMMANDS_SUPPORTED_REPORT: {id: 0x0e}
+    cmd: {
+	SECURITY_2_NONCE_GET: {
+	    id: 0x01,
+	    encode(cmd) {
+		cmd.pld = [cmd.node.s2.seq_num++];
+	    }
+	},
+	SECURITY_2_NONCE_REPORT: {id: 0x02},
+	SECURITY_2_MESSAGE_ENCAPSULATION: {id: 0x03},
+	KEX_GET: {id: 0x04},
+	KEX_REPORT: {id: 0x05},
+	KEX_SET: {id: 0x06},
+	KEX_FAIL: {id: 0x07},
+	PUBLIC_KEY_REPORT: {id: 0x08},
+	SECURITY_2_NETWORK_KEY_GET: {id: 0x09},
+	SECURITY_2_NETWORK_KEY_REPORT: {id: 0x0a},
+	SECURITY_2_NETWORK_KEY_VERIFY: {id: 0x0b},
+	SECURITY_2_TRANSFER_END: {id: 0x0c},
+	SECURITY_2_COMMANDS_SUPPORTED_GET: {id: 0x0d},
+	SECURITY_2_COMMANDS_SUPPORTED_REPORT: {id: 0x0e}
+    }
 };
 
 zwave_cc.index_it();
