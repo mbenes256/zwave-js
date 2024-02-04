@@ -7,10 +7,10 @@ does not run on Deno, plus it is just so overcomplicated - 128 npm modules for 6
 Currently this module only supports the command classes that I need in my network.
 More classes can be added with the help
 of the public [specification](https://www.silabs.com/wireless/z-wave/specification) docs.
-Also for now only S0 security is supported. S2 is work inprogress. 
+Also for now only S0 security is supported. S2 is work in progress.
 
 Main features:
- - Single ES module with no external dependencies
+ - Standalone ES modules with no external dependencies (less than 50kB)
  - Uses SubtleCrypto API for encryption
  - Limited set of API and device commands
  - S0 security only
