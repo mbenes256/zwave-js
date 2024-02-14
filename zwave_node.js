@@ -11,6 +11,9 @@ export class zwave_node {
 	this.nodeid = nodeid;
 	this.mutex = new async_mutex();
 
+	// gen proxy
+	this.gen = new Proxy(this, zwave_node.gen_proxy_handler);
+
 	// this object will be populated with receive callbacks
 	this.recv = {};
 
@@ -18,27 +21,93 @@ export class zwave_node {
 	for (let cc_def of zwave_cc._cc_id_map.values()) {
 	    cc_def.init?.(this);
 	}
+    }
 
-	// populate request functions
-	for (let [cmd_name, cmd_def] of zwave_cc._cmd_name_map.entries()) {
-	    if (cmd_def.encode) {
-		this[cmd_name] = this.run_cmd.bind(this, cmd_def);
+    static gen_proxy_handler = {
+	get(node, cmd_name) {
+	    const cmd_def = zwave_cc._cmd_name_map.get(cmd_name);
+
+	    if (cmd_def?.encode) {
+		const cmd = node.new_cmd(cmd_def);
+		return async function (args) {
+		    cmd.args = args;
+		    await cmd_def.encode(cmd);
+		    return cmd;
+		}
 	    }
 	}
     }
 
-    async run_cmd(cmd_def, args = {}, options = {}) {
-	// generate
-	let cmd = await this.gen_cmd(cmd_def, args);
+    get send() {
+	const send = {
+	    node: this,
+	    ep(epid) {this.epid = epid; return this.proxy},
+	    get s0() {this.security = "s0"; return this.proxy}
+	};
+
+	send.proxy = new Proxy(send, zwave_node.send_proxy_handler);
+
+	return send.proxy;
+    }
+
+    static send_proxy_handler = {
+	get(send, cmd_name) {
+	    const cmd_def = zwave_cc._cmd_name_map.get(cmd_name);
+
+	    if (cmd_def?.encode) {
+		const cmd = send.node.new_cmd(cmd_def, send.epid, send.security);
+
+		return function (args = {}) {
+		    cmd.args = args;
+		    const promise = send.node.run_cmd(cmd);
+		    const recv = {promise, cmd};
+		    // return the async function promise, but allow cmd modification using recv_proxy_handler
+		    promise.recv = new Proxy(recv, zwave_node.recv_proxy_handler);
+		    return promise;
+		};
+	    }
+
+	    // default to support node, ep, s0 properties
+	    return Reflect.get(...arguments);
+	}
+    }
+
+    static recv_proxy_handler = {
+	get(recv, property) {
+	    const cmd_def = zwave_cc._cmd_name_map.get(property);
+
+	    if (cmd_def?.decode) {
+		recv.cmd.recv_cmd_def = cmd_def;
+		return function (timeout = 1) {
+		    recv.cmd.recv_timeout = timeout;
+		    return recv.promise;
+		}
+	    }
+	}
+    };
+
+    new_cmd(cmd_def, epid, security) {
+	return {
+	    node: this,
+	    def: cmd_def,
+	    id: [cmd_def.cc_id, cmd_def.id],
+	    msg: [cmd_def.name],
+	    epid: epid,
+	    security: security
+	}
+    }
+
+    async run_cmd(cmd) {
+	// this await also allows cmd modification using recv_proxy_handler before we continue
+	await cmd.def.encode(cmd);
 	const cmd_orig = cmd;
 
 	// encapsulate
-	if (options.epid > 0) {
-	    cmd_orig.epid = options.epid;
+	if (cmd.epid > 0) {
 	    cmd = await zwave_cc.MULTI_CHANNEL.encapsulate(cmd);
 	}
 
-	if (options.security == 0) {
+	if (cmd.security == "s0") {
 	    cmd = await zwave_cc.SECURITY.encapsulate(cmd);
 
 	    if (typeof(cmd) == "string") {
@@ -46,41 +115,23 @@ export class zwave_node {
 	    }
 	}
 
-	// shortcut for report commands to avoid deadlock
-	if (cmd_def.is_report_cmd) {
+	// send to node only
+	if (!cmd_orig.recv_cmd_def) {
 	    return await this.z.bridge_node_send(cmd);
 	}
 
-	// requests allowed only one at a time
+	// send/recv flow
 	await this.mutex.lock();
 	this.cmd_current = cmd_orig;
-	const report = await this.send_and_report_cmd(cmd);
+	const result = await this.send_recv_cmd(cmd);
 	delete this.cmd_current;
 	this.mutex.unlock();
 
-	if (typeof(report) == "string") {
-	    return this.error(report, cmd_orig);
+	if (typeof(result) == "string") {
+	    return this.error(result, cmd_orig);
 	}
 
-	return report;
-    }
-
-    // generate command object, including encoding
-    async gen_cmd(cmd_def, args) {
-	const cmd = {
-	    node: this,
-	    def: cmd_def,
-	    id: [cmd_def.cc_id, cmd_def.id],
-	    args: args,
-	    msg: [cmd_def.name],
-	}
-
-	if (cmd_def.report_cmd) {
-	    cmd.report_cmd = cmd_def.report_cmd;
-	}
-
-	await cmd_def.encode(cmd);
-	return cmd;
+	return result;
     }
 
     error(msg, cmd) {
@@ -89,7 +140,7 @@ export class zwave_node {
 	return false;
     }
 
-    async send_and_report_cmd(cmd) {
+    async send_recv_cmd(cmd) {
 	if (!await this.z.bridge_node_send(cmd)) {
 	    // send failed
 	    return false;
@@ -98,17 +149,12 @@ export class zwave_node {
 	// retrieve original non-encapsulated command
 	const cmd_orig = this.cmd_current;
 
-	if (!cmd_orig.report_cmd) {
-	    // not expecting report
-	    return true;
-	}
-
-	// wait for report
-	const report_promise = new Promise((resolve) => {cmd_orig.report = resolve});
-	const cmd_timeout = setTimeout(cmd_orig.report.bind(null, "timeout"), 1000 * (cmd_orig.timeout ?? 1));
-	const report = await report_promise;
+	// wait for expected command
+	const promise = new Promise((resolve) => {cmd_orig.resolve = resolve});
+	const cmd_timeout = setTimeout(cmd_orig.resolve.bind(null, "timeout"), 1000 * (cmd_orig.recv_timeout ?? 1));
+	const result = await promise;
 	clearTimeout(cmd_timeout);
-	return report;
+	return result;
     }
 
     async recv_cmd(cmd) {
@@ -142,11 +188,11 @@ export class zwave_node {
 	    cmd.pld = cmd.args.cmd.pld;
 	}
 
-	// check if this is a report for a current request
-	const cmd_req = this.cmd_current;
+	// check if this matches an expected command
+	const cmd_current = this.cmd_current;
 
-	if (cmd_req && (cmd_req.report_cmd == cmd_def) && (cmd_req.epid == cmd.epid)) {
-	    cmd_req.report(cmd.args);
+	if (cmd_current && (cmd_current.recv_cmd_def == cmd_def) && (cmd_current.epid == cmd.epid)) {
+	    cmd_current.resolve(cmd.args);
 	} else {
 	    if (cmd.epid > 0) {
 		// add epid to args

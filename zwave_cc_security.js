@@ -237,7 +237,7 @@ zwave_cc_security.SECURITY = {
     id: 0x98,
     init(node) {
 	node.s0 = {nonce: Array(256), nonce_id: 0};
-	node.recv.SECURITY_NONCE_GET = this.send_nonce_report.bind(null, node);
+	node.recv.SECURITY_NONCE_GET = this.send_nonce_report.bind(this, node);
     },
     async inclusion(node) {
 	if (await node.SECURITY_SCHEME_GET()) {
@@ -255,27 +255,27 @@ zwave_cc_security.SECURITY = {
         setTimeout(() => {nonce.length = 0}, 3000);
 
 	// send
-	node.SECURITY_NONCE_REPORT({nonce});
+	node.send.SECURITY_NONCE_REPORT({nonce});
     },
     async encapsulate(cmd) {
 	const node = cmd.node;
 	const z = node.z;
 	const key = (cmd.def == this.cmd.NETWORK_KEY_SET) ? z.s0_temp_key : z.s0_key;
-	const report = await cmd.node.run_cmd(this.cmd.SECURITY_NONCE_GET);
+	const report = await node.send.SECURITY_NONCE_GET().recv.SECURITY_NONCE_REPORT();
 
 	if (!report) {
 	    return "no receiver_nonce for S0 encapsulation";
 	}
 
 	const receiver_nonce = report.nonce;
-	return await node.gen_cmd(this.cmd.SECURITY_MESSAGE_ENCAPSULATION, {cmd, key, receiver_nonce});
+	return await node.gen.SECURITY_MESSAGE_ENCAPSULATION({cmd, key, receiver_nonce});
     },
     cmd: {
-	SECURITY_SCHEME_GET: {id: 0x04, report_cmd: "SECURITY_SCHEME_REPORT", encode_fmt: {supported: 1}},
+	SECURITY_SCHEME_GET: {id: 0x04, encode_fmt: {supported: 1}},
 	SECURITY_SCHEME_REPORT: {id: 0x05, decode_fmt: {supported: 1}},
-	NETWORK_KEY_SET: {id: 0x06, report_cmd: "NETWORK_KEY_VERIFY", encode_fmt: {key: 16}},
+	NETWORK_KEY_SET: {id: 0x06, encode_fmt: {key: 16}},
 	NETWORK_KEY_VERIFY: {id: 0x07, decode_fmt: {}},
-	SECURITY_NONCE_GET: {id: 0x40, report_cmd: "SECURITY_NONCE_REPORT", encode_fmt: {}, decode_fmt: {}},
+	SECURITY_NONCE_GET: {id: 0x40, encode_fmt: {}, decode_fmt: {}},
 	SECURITY_NONCE_REPORT: {id: 0x80, encode_fmt: {nonce: 8}, decode_fmt: {nonce: 8}},
 	SECURITY_MESSAGE_ENCAPSULATION: {
 	    id: 0x81,
@@ -358,12 +358,17 @@ zwave_cc_security.SECURITY = {
 
 zwave_cc_security.SECURITY_2 = {
     id: 0x9f,
+    init(node) {
+	node.s2 = {};
+    },
+    async bootstrap(node) {
+    },
     cmd: {
 	SECURITY_2_NONCE_GET: {id: 0x01},
 	SECURITY_2_NONCE_REPORT: {id: 0x02},
 	SECURITY_2_MESSAGE_ENCAPSULATION: {id: 0x03},
-	KEX_GET: {id: 0x04},
-	KEX_REPORT: {id: 0x05},
+	KEX_GET: {id: 0x04, encode_fmt: {}},
+	KEX_REPORT: {id: 0x05, decode_fmt: {flags:1, supported_schemes: 1, supported_profiles: 1, requested_keys: 1}},
 	KEX_SET: {id: 0x06},
 	KEX_FAIL: {id: 0x07},
 	PUBLIC_KEY_REPORT: {id: 0x08},

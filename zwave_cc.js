@@ -20,7 +20,6 @@ import {zwave_cc_security} from "./zwave_cc_security.js"
  *
  * command definition object properties:
  *   id: <command id as number>
- *   report_cmd: <string name of command that is a response to this command>
  *   encode_fmt: format definition object to encode commands for sending
  *   decode_fmt: format definition object to decode received commands
  *   encode(cmd): function that encodes complex commands, takes command object as argument
@@ -38,7 +37,8 @@ import {zwave_cc_security} from "./zwave_cc_security.js"
  *   msg: array of values to print to log (append by encode() and decode())
  *   pld: encoded payload as array of byte numbers (generate in encode(), consume in decode())
  *   args: object defining command parameters (consume in encode(), generate in decode())
- *   epid: multi-channel endpoint id
+ *   epid: multi-channel endpoint id or undefined
+ *   security: "s0" or undefined
  */
 
 export var zwave_cc = {}
@@ -88,13 +88,5 @@ for (let [cc_name, cc_def] of Object.entries(zwave_cc)) {
 		}
 	    }
 	}
-    }
-}
-
-// convert report_cmd from string to cmd_def now that all commands are indexed
-for (let [cmd_name, cmd_def] of zwave_cc._cmd_name_map.entries()) {
-    if (cmd_def.report_cmd) {
-	cmd_def.report_cmd = zwave_cc._cmd_name_map.get(cmd_def.report_cmd);
-	cmd_def.report_cmd.is_report_cmd = true;
     }
 }

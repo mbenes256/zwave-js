@@ -8,7 +8,7 @@ zwave_cc_basic.BINARY_SWITCH = {
     id: 0x25,
     cmd: {
 	SWITCH_BINARY_SET: {id: 0x01, encode_fmt: {value: 1}},
-	SWITCH_BINARY_GET: {id: 0x02, encode_fmt: {}, report_cmd: "SWITCH_BINARY_REPORT"},
+	SWITCH_BINARY_GET: {id: 0x02, encode_fmt: {}},
 	SWITCH_BINARY_REPORT: {id: 0x03, decode_fmt: [{value: 1, target: 1, duration: 1}, {value: 1}]}
     }
 };
@@ -46,7 +46,7 @@ zwave_cc_basic.CONFIGURATION = {
 		cmd.msg.push("param:" + param, "size:" + size, "value:" + value);
 	    }
 	},
-	CONFIGURATION_GET: {id: 0x05, report_cmd: "CONFIGURATION_REPORT", encode_fmt: {param: 1}},
+	CONFIGURATION_GET: {id: 0x05, encode_fmt: {param: 1}},
 	CONFIGURATION_REPORT: {
 	    id: 0x06,
 	    decode(cmd) {
@@ -82,7 +82,7 @@ zwave_cc_basic.CONFIGURATION = {
 zwave_cc_basic.BATTERY = {
     id: 0x80,
     cmd: {
-	BATTERY_GET: {id: 0x02, encode_fmt: {}, report_cmd: "BATTERY_REPORT"},
+	BATTERY_GET: {id: 0x02, encode_fmt: {}},
 	BATTERY_REPORT: {id: 0x03, decode_fmt: [{level: 1, flags: 2}, {level: 1}]}
     }
 };
@@ -104,7 +104,7 @@ zwave_cc_basic.WAKE_UP = {
 zwave_cc_basic.MULTI_CHANNEL = {
     id: 0x60,
     async encapsulate(cmd) {
-	return await cmd.node.gen_cmd(this.cmd.MULTI_CHANNEL_CMD_ENCAP, {cmd});
+	return await cmd.node.gen.MULTI_CHANNEL_CMD_ENCAP({cmd});
     },
     cmd: {
 	MULTI_CHANNEL_CMD_ENCAP: {
