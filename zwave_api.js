@@ -1,7 +1,6 @@
 import {async_mutex, sleep, obj_val_key, get_bit_list, hex_bytes, encode_msb_first} from "./zwave_utils.js"
 import {zwave_node} from "./zwave_node.js"
 import {zwave_cc} from "./zwave_cc.js"
-import {s0_key_gen, aes_block} from "./zwave_cc_security.js"
 
 /*
  * This class handles sending and receiving API commands to Z-Wave chip
@@ -52,13 +51,13 @@ export class zwave_api {
     // recv_func      ... async function that returns 1 byte received from serial port as Number
     // send_func      ... function that takes Array of Numbers as bytes to send to serial port
     // log_func       ... function to log low-level send/receive command info
-    // s0_network_key ... Array of 16 numbers
+    // security       ... security configuration (keys and enabled nodes)
 
-    constructor(recv_func, send_func, log_func, s0_network_key) {
+    constructor(recv_func, send_func, log_func, security) {
 	this.send_func = send_func;
 	this.recv_func = recv_func;
 	this.log_func = log_func;
-	this.s0_network_key = s0_network_key;
+	this.security = security;
 	this.tx_options = 0x25; // ACK + AUTO_ROUTE + EXPLORE
 	this.unsolicited_mutex = new async_mutex();
 	this.api_cmd_mutex = new async_mutex();
@@ -67,9 +66,6 @@ export class zwave_api {
     }
 
     async init() {
-	this.s0_key = await s0_key_gen(this.s0_network_key);
-	this.s0_temp_key = await s0_key_gen(aes_block(0));
-
 	// start receive loop in backdround
 	this.recv_loop();
 
@@ -80,6 +76,22 @@ export class zwave_api {
 	await this.set_nodeid_base_type(false);
 	await this.get_network_ids();
 	await this.get_init_data();
+
+	// security
+	let node;
+	for (let nodeid of this.security.s0.nodes) {
+	    if (node = this.nodes.get(nodeid)) {
+		await zwave_cc.SECURITY.security_init(node);
+	    }
+	}
+
+	for (let subtype = 0; subtype < 2; ++subtype) {
+	    for (let nodeid of this.security.s2[subtype].nodes) {
+		if (node = this.nodes.get(nodeid)) {
+		    await zwave_cc.SECURITY_2.security_init(node, subtype);
+		}
+	    }
+	}
     }
 
     node(nodeid) {
@@ -610,7 +622,17 @@ export class zwave_api {
 	const nodeid = await this.add_node_to_network();
 
 	if (nodeid) {
-	    return await zwave_cc.SECURITY.inclusion(this.node(nodeid));
+	    return await zwave_cc.SECURITY.bootstrap(this.node(nodeid));
+	}
+
+	return false;
+    }
+
+    async add_s2_node_to_network(dsk) {
+	const nodeid = await this.add_node_to_network();
+
+	if (nodeid) {
+	    return await zwave_cc.SECURITY_2.bootstrap(this.node(nodeid), dsk);
 	}
 
 	return false;

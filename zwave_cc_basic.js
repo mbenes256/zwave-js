@@ -4,6 +4,15 @@
 
 export const zwave_cc_basic = {};
 
+zwave_cc_basic.BASIC = {
+    id: 0x20,
+    cmd: {
+	BASIC_SET: {id: 0x01, encode_fmt: {value: 1}},
+	BASIC_GET: {id: 0x02, encode_fmt: {}},
+	BASIC_REPORT: {id: 0x03, decode_fmt: [{value: 1, target: 1, duration: 1}, {value: 1}]}
+    }
+};
+
 zwave_cc_basic.BINARY_SWITCH = {
     id: 0x25,
     cmd: {
@@ -42,7 +51,7 @@ zwave_cc_basic.CONFIGURATION = {
 		    dv.setInt32(0, value);
 		}
 
-		cmd.pld = [param, size, Array.from(val_buf)],
+		cmd.pld = [param, size, Array.from(val_buf)];
 		cmd.msg.push("param:" + param, "size:" + size, "value:" + value);
 	    }
 	},
@@ -101,16 +110,31 @@ zwave_cc_basic.WAKE_UP = {
     }
 };
 
+zwave_cc_basic.VERSION = {
+    id: 0x86,
+    cmd: {
+	VERSION_GET: {id: 0x11, encode_fmt: {}},
+	VERSION_REPORT: {id: 0x12, decode_fmt: {info: 0}}
+    }
+};
+
 zwave_cc_basic.MULTI_CHANNEL = {
     id: 0x60,
     async encapsulate(cmd) {
 	return await cmd.node.gen.MULTI_CHANNEL_CMD_ENCAP({cmd});
     },
     cmd: {
+	MULTI_CHANNEL_END_POINT_GET: {id: 0x07, encode_fmt: {}},
+	MULTI_CHANNEL_END_POINT_REPORT: {id: 0x08, decode_fmt:
+					 [{flags: 1, end_points: 1},
+					  {flags: 1, individual_end_points: 1, aggregated_end_poins: 1}]},
+	MULTI_CHANNEL_CAPABILITY_GET: {id: 0x09, encode_fmt: {epid: 1}},
+	MULTI_CHANNEL_CAPABILITY_REPORT: {
+	    id: 0x0a, decode_fmt: {epid: 1, generic_class:1, specific_class: 1, cc_list: 0}},
 	MULTI_CHANNEL_CMD_ENCAP: {
 	    id: 0x0d,
 	    encode(cmd) {
-		cmd.pld = [0, cmd.args.cmd.epid, cmd.args.cmd.id, cmd.args.cmd.pld].flat();
+		cmd.pld = [0, cmd.args.cmd.epid, cmd.args.cmd.id, cmd.args.cmd.pld];
 		cmd.msg.push("epid:" + cmd.args.cmd.epid, "|", ...cmd.args.cmd.msg);
 	    },
 	    decode(cmd) {

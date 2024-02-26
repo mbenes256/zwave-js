@@ -1,4 +1,4 @@
-import {async_mutex} from "./zwave_utils.js"
+import {async_mutex, hex_bytes} from "./zwave_utils.js"
 import {zwave_cc} from "./zwave_cc.js"
 
 /*
@@ -16,11 +16,6 @@ export class zwave_node {
 
 	// this object will be populated with receive callbacks
 	this.recv = {};
-
-	// let each class initialize its data structures
-	for (let cc_def of zwave_cc._cc_id_map.values()) {
-	    cc_def.init?.(this);
-	}
     }
 
     static gen_proxy_handler = {
@@ -41,12 +36,10 @@ export class zwave_node {
     get send() {
 	const send = {
 	    node: this,
-	    ep(epid) {this.epid = epid; return this.proxy},
-	    get s0() {this.security = "s0"; return this.proxy}
+	    ep(epid) {this.epid = epid; return this.proxy}
 	};
 
 	send.proxy = new Proxy(send, zwave_node.send_proxy_handler);
-
 	return send.proxy;
     }
 
@@ -55,7 +48,7 @@ export class zwave_node {
 	    const cmd_def = zwave_cc._cmd_name_map.get(cmd_name);
 
 	    if (cmd_def?.encode) {
-		const cmd = send.node.new_cmd(cmd_def, send.epid, send.security);
+		const cmd = send.node.new_cmd(cmd_def, send.epid);
 
 		return function (args = {}) {
 		    cmd.args = args;
@@ -86,14 +79,13 @@ export class zwave_node {
 	}
     };
 
-    new_cmd(cmd_def, epid, security) {
+    new_cmd(cmd_def, epid) {
 	return {
 	    node: this,
 	    def: cmd_def,
 	    id: [cmd_def.cc_id, cmd_def.id],
 	    msg: [cmd_def.name],
-	    epid: epid,
-	    security: security
+	    epid: epid
 	}
     }
 
@@ -103,12 +95,12 @@ export class zwave_node {
 	const cmd_orig = cmd;
 
 	// encapsulate
-	if (cmd.epid > 0) {
+	if (cmd_orig.epid > 0) {
 	    cmd = await zwave_cc.MULTI_CHANNEL.encapsulate(cmd);
 	}
 
-	if (cmd.security == "s0") {
-	    cmd = await zwave_cc.SECURITY.encapsulate(cmd);
+	if (this.security) {
+	    cmd = await this.security.cc.encapsulate(cmd);
 
 	    if (typeof(cmd) == "string") {
 		return this.error(cmd, cmd_orig);
@@ -141,17 +133,21 @@ export class zwave_node {
     }
 
     async send_recv_cmd(cmd) {
-	if (!await this.z.bridge_node_send(cmd)) {
-	    // send failed
-	    return false;
-	}
-
 	// retrieve original non-encapsulated command
 	const cmd_orig = this.cmd_current;
 
-	// wait for expected command
+	// setup promise for response or error
 	const promise = new Promise((resolve) => {cmd_orig.resolve = resolve});
+
+	// send request
+	if (!await this.z.bridge_node_send(cmd)) {
+	    cmd_orig.resolve("send failed");
+	}
+
+	// start timer
 	const cmd_timeout = setTimeout(cmd_orig.resolve.bind(null, "timeout"), 1000 * (cmd_orig.recv_timeout ?? 1));
+
+	// wait for response (args object) or error (string)
 	const result = await promise;
 	clearTimeout(cmd_timeout);
 	return result;

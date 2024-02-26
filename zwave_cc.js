@@ -22,6 +22,7 @@ import {zwave_cc_security} from "./zwave_cc_security.js"
  *   id: <command id as number>
  *   encode_fmt: format definition object to encode commands for sending
  *   decode_fmt: format definition object to decode received commands
+ *   fmt: common decode_fmt and encode_fmt (in which case those are ginored)
  *   encode(cmd): function that encodes complex commands, takes command object as argument
  *   decode(cmd): function that decodes complex commands, takes command object as argument
  *
@@ -66,6 +67,11 @@ for (let [cc_name, cc_def] of Object.entries(zwave_cc)) {
 		zwave_cc._cmd_name_map.set(cmd_name, cmd_def);
 
 		// convert fmt to encode/decode
+		if (cmd_def.fmt) {
+		    cmd_def.encode_fmt = cmd_def.fmt;
+		    cmd_def.decode_fmt = cmd_def.fmt;
+		}
+
 		if (cmd_def.encode_fmt) {
 		    const fmt = cmd_def.encode_fmt;
 		    cmd_def.encode = (cmd) => {
