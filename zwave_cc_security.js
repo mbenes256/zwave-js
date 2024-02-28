@@ -633,7 +633,7 @@ zwave_cc_security.SECURITY_2 = {
 		const nonce = await span.next_nonce();
 
 		// encrypt
-		const decrypted_pld = [cmd.args.cmd.id, cmd.args.cmd.pld ?? []].flat();
+		const decrypted_pld = [cmd.args.cmd.id, cmd.args.cmd.pld ?? []].flat(10);
 		const encrypted_pld = await aes_ccm_encrypt(key_ccm, nonce, decrypted_pld);
 
 		// authenticate
