@@ -304,7 +304,7 @@ zwave_cc_security.SECURITY = {
     async bootstrap(node) {
 	if (await node.send.SECURITY_SCHEME_GET().recv.SECURITY_SCHEME_REPORT(2)) {
 	    await this.security_init(node);
-	    return await node.send.NETWORK_KEY_SET({key: node.security.key}).recv.NETWORK_KEY_VERIFY(2);
+	    return await node.send.NETWORK_KEY_SET({key: node.security.key.raw}).recv.NETWORK_KEY_VERIFY(2);
 	}
     },
     recv_nonce_get(node) {
