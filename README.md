@@ -5,11 +5,13 @@ with light switches and motion sensors, garage door, etc and be able to integrat
 I wanted to use Deno instead of Node.js, but the [full-featured Z-Wave Javascript implementation](https://github.com/zwave-js)
 did not run on Deno at the time, plus it is very large - 128 npm modules for 60MB! Also Node security and privacy is a concern.
 
+This code is mainly for programmers who want to write automation using javascript rather than GUIs.
+
 Below is a list of commands and classes implemented. More classes can be added with the help
 of the public [specification](https://www.silabs.com/wireless/z-wave/specification) docs.
 
 Main features:
- - Standalone ES modules with no external dependencies or FFI (less than 60kB)
+ - Standalone ES modules with no external dependencies or FFI (less than 70kB)
  - Uses SubtleCrypto API for encryption
  - Limited set of API and device commands
  - Security (S0 and S2)
@@ -41,6 +43,10 @@ Device command classes supported:
  - Version
  - Security (S0)
  - Security2 (S2)
+ - Association
+ - Association Group Info
+ - Central Scene
+ - Zwave Plus Info
 
 Running on Ubuntu Linux / Deno 1.36.1 using this hardware:
  - Aeotec Z-Stick 7
@@ -50,6 +56,8 @@ Running on Ubuntu Linux / Deno 1.36.1 using this hardware:
  - Ecolink PIRZWAVE2.5 Z-Wave Plus Motion Sensor
  - GE Enbrighten Z-Wave Plus Smart Outlet Receptacle
  - ZOOZ ZEN17 Relay
+ - ZOOZ ZEN34 Remote Switch
+ - Homeseer HS-DS100+ Door/window Sensor
 
 # Usage Examples
 
