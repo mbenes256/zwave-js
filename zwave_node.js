@@ -15,7 +15,15 @@ export class zwave_node {
 	this.gen = new Proxy(this, zwave_node.gen_proxy_handler);
 
 	// this object will be populated with receive callbacks
-	this.recv = {};
+	this.recv = {
+	    _ep: [],
+	    ep(epid) {
+		if (!this._ep[epid]) {
+		    this._ep[epid] = {};
+		}
+		return this._ep[epid];
+	    }
+	};
     }
 
     static gen_proxy_handler = {
@@ -155,11 +163,10 @@ export class zwave_node {
 
     async recv_cmd(cmd) {
 	cmd.node = this;
-	let cmd_def;
 
 	while (true) {
 	    // decode
-	    cmd_def = zwave_cc._cc_id_map.get(cmd.id[0])?._cmd_id_map.get(cmd.id[1]);
+	    var cmd_def = zwave_cc._cc_id_map.get(cmd.id[0])?._cmd_id_map.get(cmd.id[1]);
 
 	    if (!cmd_def?.decode) {
 		cmd.msg.push("unsupported command for receive:", hex_bytes(cmd.id));
@@ -170,7 +177,6 @@ export class zwave_node {
 	    await cmd_def.decode(cmd);
 
 	    if (!cmd.args) {
-		cmd.msg.push("bad encoding");
 		return;
 	    }
 
@@ -182,6 +188,13 @@ export class zwave_node {
 	    // encapsulated - replace id/pld and repeat
 	    cmd.id = cmd.args.cmd.id;
 	    cmd.pld = cmd.args.cmd.pld;
+	    delete cmd.args;
+	}
+
+	// check if should be secure
+	if (this.security && !cmd_def.no_encap && !cmd.secure) {
+	    cmd.msg.push("(not secure - ignored)");
+	    return;
 	}
 
 	// check if this matches an expected command
@@ -190,13 +203,9 @@ export class zwave_node {
 	if (cmd_current && (cmd_current.recv_cmd_def == cmd_def) && (cmd_current.epid == cmd.epid)) {
 	    cmd_current.resolve(cmd.args);
 	} else {
-	    if (cmd.epid > 0) {
-		// add epid to args
-		cmd.args.epid = cmd.epid;
-	    }
-
 	    // user callback
-	    this.recv[cmd_def.name]?.(cmd.args);
+	    let recv = cmd.epid ? this.recv.ep(cmd.epid) : this.recv;
+	    recv[cmd_def.name]?.(cmd.args);
 	}
     }
 }

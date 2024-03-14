@@ -417,6 +417,7 @@ zwave_cc_security.SECURITY = {
 
 		// extract encapsulated cmd
 		cmd.args = {cmd: {id: decrypted_pld.slice(1, 3), pld: decrypted_pld.slice(3)}};
+		cmd.secure = true;
 		cmd.msg.push("|");
 	    }
 	}
@@ -765,6 +766,7 @@ zwave_cc_security.SECURITY_2 = {
 		}
 
 		cmd.args = {cmd: {id: encapsulated_cmd.slice(0, 2), pld: encapsulated_cmd.slice(2)}};
+		cmd.secure = true;
 		cmd.msg.push("|");
 	    }
 	},

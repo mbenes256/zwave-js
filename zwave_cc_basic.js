@@ -7,13 +7,13 @@ export const zwave_cc_basic = {};
 zwave_cc_basic.BASIC = {
     id: 0x20,
     cmd: {
-	BASIC_SET: {id: 0x01, encode_fmt: {value: 1}},
+	BASIC_SET: {id: 0x01, fmt: {value: 1}},
 	BASIC_GET: {id: 0x02, encode_fmt: {}},
 	BASIC_REPORT: {id: 0x03, decode_fmt: [{value: 1, target: 1, duration: 1}, {value: 1}]}
     }
 };
 
-zwave_cc_basic.BINARY_SWITCH = {
+zwave_cc_basic.SWITCH_BINARY = {
     id: 0x25,
     cmd: {
 	SWITCH_BINARY_SET: {id: 0x01, encode_fmt: {value: 1}},
@@ -22,11 +22,35 @@ zwave_cc_basic.BINARY_SWITCH = {
     }
 };
 
-zwave_cc_basic.BINARY_SENSOR = {
+zwave_cc_basic.SENSOR_BINARY = {
     id: 0x30,
     cmd: {
 	SENSOR_BINARY_GET: {id: 0x02, encode_fmt: {}},
 	SENSOR_BINARY_REPORT: {id: 0x03, decode_fmt: [{value: 1, type: 1}, {value: 1}]}
+    }
+};
+
+zwave_cc_basic.ASSOCIATION_GRP_INFO = {
+    id: 0x59,
+    cmd: {
+	ASSOCIATION_GROUP_NAME_GET: {id: 0x01, fmt: {}},
+	ASSOCIATION_GROUP_NAME_REPORT: {id: 0x02, fmt: {}},
+	ASSOCIATION_GROUP_INFO_GET: {id: 0x03, fmt: {flags: 1, group: 1}},
+	ASSOCIATION_GROUP_INFO_REPORT: {id: 0x04, fmt: {count: 1, grpup: 1, info: 6}},
+	ASSOCIATION_GROUP_COMMAND_LIST_GET: {id: 0x05, fmt: {flags: 1, group: 1}},
+	ASSOCIATION_GROUP_COMMAND_LIST_REPORT: {id: 0x06, fmt: {grpup: 1, length: 1, cmds: 0}},
+    }
+}
+
+zwave_cc_basic.CENTRAL_SCENE = {
+    id: 0x5b,
+    cmd: {
+	CENTRAL_SCENE_SUPPORTED_GET: {id: 0x01, fmt: {}},
+	CENTRAL_SCENE_SUPPORTED_REPORT: {id: 0x02, fmt: {}},
+	CENTRAL_SCENE_NOTIFICATION: {id: 0x03, decode_fmt: {seq_num: 1, key_attr: 1, scene_num: 1}},
+	CENTRAL_SCENE_CONFIGURATION_SET: {id: 0x04, fmt: {}},
+	CENTRAL_SCENE_CONFIGURATION_GET: {id: 0x05, fmt: {}},
+	CENTRAL_SCENE_CONFIGURATION_REPORT: {id: 0x06, fmt: {}}
     }
 };
 
@@ -68,6 +92,41 @@ zwave_cc_basic.MULTI_CHANNEL = {
 		cmd.msg.push("epid:" + cmd.epid, "|");
 	    }
 	}
+    }
+};
+
+zwave_cc_basic.SUPERVISION = {
+    id: 0x6c,
+    cmd: {
+	SUPERVISION_GET: {
+	    id: 0x01,
+	    decode(cmd) {
+		if ((cmd.pld.length < 4) || ((cmd.pld[1] + 2) != cmd.pld.length)) {
+		    cmd.msg.push("bad encoding");
+		    return;
+		}
+
+		const session = cmd.pld[0] & 0x3f;
+		cmd.node.send.SUPERVISION_REPORT({session, status: 0xff, duration: 0});
+
+		/* ignore for now since sometimes we see duplicate session for legit new commands
+		if (!cmd.node.supervision) {
+		    cmd.node.supervision = {last_session: 256};
+		}
+
+		if (session == cmd.node.supervision.last_session) {
+		    cmd.msg.push("duplicate");
+		    return;
+		}
+
+		cmd.node.supervision.last_session = session;
+		*/
+
+		cmd.args = {cmd: {id: cmd.pld.slice(2, 4), pld: cmd.pld.slice(4)}};
+		cmd.msg.push("session:" + session, "|");
+	    }
+	},
+	SUPERVISION_REPORT: {id: 0x02, fmt: {session: 1, status:1, duration: 1}}
     }
 };
 
@@ -179,7 +238,13 @@ zwave_cc_basic.BATTERY = {
 zwave_cc_basic.WAKE_UP = {
     id: 0x84,
     cmd: {
-	WAKE_UP_NOTIFICATION: {id: 0x07, decode_fmt: {}}
+	WAKE_UP_INTERVAL_SET: {id: 0x04, encode_fmt: {secs: 3, nodeid: 1}},
+	WAKE_UP_INTERVAL_GET: {id: 0x05, encode_fmt: {}},
+	WAKE_UP_INTERVAL_REPORT: {id: 0x06, decode_fmt: {secs: 3, nodeid: 1}},
+	WAKE_UP_NOTIFICATION: {id: 0x07, decode_fmt: {}},
+	WAKE_UP_NO_MORE_INFORMATION: {id: 0x08, fmt: {}},
+	WAKE_UP_INTERVAL_CAPABILITIES_GET: {id: 0x09, fmt: {}},
+	WAKE_UP_INTERVAL_CAPABILITIES_REPORT: {id: 0x0A, fmt: {}}
     }
 };
 
