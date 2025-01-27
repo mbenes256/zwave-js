@@ -494,7 +494,7 @@ zwave_cc_security.SECURITY_2 = {
 	// send our public key and establish temporary SPAN
 	const kex_set_echo = await node
 	      .send.PUBLIC_KEY_REPORT({including_node: 1, public_key: A_public_key})
-	      .recv.KEX_SET(10);
+	      .recv.KEX_SET(20);
 
 	if (!kex_set_echo || !(kex_set_echo.flags & 1) /* echo not set */ ||
 	    (kex_set_echo.granted_keys != granted_key)) {

@@ -30,6 +30,50 @@ zwave_cc_basic.SENSOR_BINARY = {
     }
 };
 
+zwave_cc_basic.SENSOR_MULTILEVEL = {
+    id: 0x31,
+    cmd: {
+	SENSOR_MULTILEVEL_SUPPORTED_GET_SENSOR: {id: 0x01, encode_fmt: {}},
+	SENSOR_MULTILEVEL_SUPPORTED_SENSOR_REPORT: {id: 0x02, decode_fmt: {bit_mask: 0}},
+	SENSOR_MULTILEVEL_SUPPORTED_GET_SCALE: {id: 0x03, encode_fmt: {type: 1}},
+	SENSOR_MULTILEVEL_GET: {id: 0x04, encode_fmt: {type: 1, scale_bit_mask: 1}},
+	SENSOR_MULTILEVEL_REPORT: {
+	    id: 0x05,
+	    decode(cmd) {
+		if (cmd.pld.length < 3) {
+		    cmd.msg.push("bad encoding");
+		    return;
+		}
+
+		const type = cmd.pld[0];
+		const size = cmd.pld[1] & 0x7;
+		const scale = (cmd.pld[1] >> 3) & 0x3;
+		const precision = cmd.pld[1] >> 5;
+		const dv = new DataView((new Uint8Array(cmd.pld.slice(2))).buffer);
+		let value;
+
+		if (size <= dv.byteLength) {
+		    if (size == 1) {
+			value = dv.getInt8(0);
+		    } else if (size == 2) {
+			value = dv.getInt16(0);
+		    } else if (size == 4) {
+			value = dv.getInt32(0);
+		    }
+		}
+
+		if (value != undefined) {
+		    value /= Math.pow(10, precision);
+		    cmd.args = {type, scale, value};
+		    cmd.msg.push("type:" + type, "scale:" + scale, "value:" + value);
+		} else {
+		    cmd.msg.push("bad encoding");
+		}
+	    }
+	}
+    }
+};
+
 zwave_cc_basic.ASSOCIATION_GRP_INFO = {
     id: 0x59,
     cmd: {
@@ -38,7 +82,7 @@ zwave_cc_basic.ASSOCIATION_GRP_INFO = {
 	ASSOCIATION_GROUP_INFO_GET: {id: 0x03, fmt: {flags: 1, group: 1}},
 	ASSOCIATION_GROUP_INFO_REPORT: {id: 0x04, fmt: {count: 1, grpup: 1, info: 6}},
 	ASSOCIATION_GROUP_COMMAND_LIST_GET: {id: 0x05, fmt: {flags: 1, group: 1}},
-	ASSOCIATION_GROUP_COMMAND_LIST_REPORT: {id: 0x06, fmt: {grpup: 1, length: 1, cmds: 0}},
+	ASSOCIATION_GROUP_COMMAND_LIST_REPORT: {id: 0x06, fmt: {grpup: 1, length: 1, cmds: 0}}
     }
 }
 
@@ -242,7 +286,7 @@ zwave_cc_basic.WAKE_UP = {
 	WAKE_UP_INTERVAL_GET: {id: 0x05, encode_fmt: {}},
 	WAKE_UP_INTERVAL_REPORT: {id: 0x06, decode_fmt: {secs: 3, nodeid: 1}},
 	WAKE_UP_NOTIFICATION: {id: 0x07, decode_fmt: {}},
-	WAKE_UP_NO_MORE_INFORMATION: {id: 0x08, fmt: {}},
+	WAKE_UP_NO_MORE_INFORMATION: {id: 0x08, encode_fmt: {}},
 	WAKE_UP_INTERVAL_CAPABILITIES_GET: {id: 0x09, fmt: {}},
 	WAKE_UP_INTERVAL_CAPABILITIES_REPORT: {id: 0x0A, fmt: {}}
     }
